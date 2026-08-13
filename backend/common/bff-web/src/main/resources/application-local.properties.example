@@ -1,0 +1,28 @@
+# 공용 인프라 호스트(기본은 Postgres·LiteLLM, 필요 시 Keycloak도)를 쓰면서 bff만 로컬로 띄우기 위한 설정 예시.
+# application-local.properties로 복사해서 쓴다. gitignore 대상 — 절대 커밋 금지.
+# 비밀값(플레이스홀더로 둔 항목)은 반드시 실제 값으로 채워야 하며, 절대 이 예시 파일엔 넣지 않는다.
+#
+# ⚠️ Java .properties는 줄 끝 인라인 주석(`# ...`)을 지원하지 않는다 — `=` 뒤는 전부 값이 된다.
+#    그래서 설명은 항상 값 위 줄에 따로 쓴다.
+
+# --- 필수(비밀) ---
+
+# 그 호스트 infra/.env의 POSTGRES_PASSWORD와 동일
+spring.datasource.password=여기에_실제_비밀번호_입력
+
+# frontend/.env.local과 동일 값 재사용 가능
+spring.ai.openai.api-key=여기에_실제_LiteLLM_키_입력
+
+# --- 공용 호스트 오버라이드: DB·LLM (주소값 — 비밀 아님) ---
+# application.properties의 기본값은 전부 localhost다. Postgres·LiteLLM까지 내 PC에 직접 도커로
+# 띄운다면 아래 2줄을 지우거나 주석 처리한다. 주소는 실제 호스트에 맞게 바꾼다.
+spring.datasource.url=jdbc:postgresql://<공용호스트주소>:5442/appdb
+spring.ai.openai.base-url=http://<공용호스트주소>:4000/v1
+
+# --- 공용 호스트 오버라이드: 인증(Keycloak) — 기본은 끈 상태 ---
+# DB·LLM과 독립된 스위치라 기본값(로컬 Keycloak)으로 두는 편이 안전해서 주석 처리해뒀다.
+# ⚠️ 이 2줄을 켠다면 frontend/.env.local의 KEYCLOAK_* 도 반드시 같은 호스트로 맞춘다.
+#    한쪽만 바꾸면 client는 로컬 Keycloak으로 로그인하고 bff는 공용 호스트로 검증해 서명이 안 맞고,
+#    그 증상이 "401 에러"가 아니라 로그인 화면 무한 반복이라 원인을 알아보기 어렵다.
+#spring.security.oauth2.resourceserver.jwt.jwk-set-uri=http://<공용호스트주소>:8081/realms/app-realm/protocol/openid-connect/certs
+#app.security.public-issuer=http://<공용호스트주소>:8081/realms/app-realm

@@ -1,0 +1,15 @@
+# 저장소 줄바꿈 정책: 모든 텍스트 파일을 LF 로 통일한다.
+# - Biome formatter.lineEnding = "lf" 및 크로스플랫폼 일관성 확보.
+# - core.autocrlf 로컬 설정과 무관하게 워킹트리·저장소 모두 LF 강제(eol=lf).
+* text=auto eol=lf
+
+# 바이너리 — 줄바꿈 정규화에서 제외
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff  binary
+*.woff2 binary
+*.pdf  binary

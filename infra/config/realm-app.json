@@ -1,0 +1,55 @@
+{
+  "realm": "${KEYCLOAK_REALM}",
+  "enabled": true,
+  "roles": {
+    "realm": [
+      {
+        "name": "USER",
+        "description": "채팅 이용 권한. BFF가 이 역할을 요구한다."
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "${APP_USER}",
+      "enabled": true,
+      "email": "${APP_USER}@example.invalid",
+      "emailVerified": true,
+      "firstName": "App",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${APP_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["USER"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "${KEYCLOAK_CLIENT_ID}",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "secret": "${KEYCLOAK_CLIENT_SECRET}",
+      "redirectUris": ["${PUBLIC_FRONTEND_URL}/api/auth/callback/keycloak"],
+      "webOrigins": ["${PUBLIC_FRONTEND_URL}"],
+      "attributes": {
+        "post.logout.redirect.uris": "${PUBLIC_FRONTEND_URL}"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "${KEYCLOAK_CLIENT_ID}",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

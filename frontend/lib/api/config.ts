@@ -1,0 +1,38 @@
+/********************************************************
+ 파일명 : config.ts (lib/api)
+ 설 명 : BFF 단일 진입점 base URL 및 목업 토글. CLIENT는 오직 BFF만 호출한다.
+ NEXT_PUBLIC_BFF_BASE_URL 미설정('')이면 동일 오리진 Next Route Handler 목업을 쓰고,
+ 실 BFF 주소를 넣으면 교차출처 실연동으로 전환되며 목업 라우트는 우회된다.
+ *********************************************************/
+
+/** BFF 절대 베이스 URL. 비어 있으면 동일 오리진(목업) 의미. */
+export const BFF_BASE_URL = process.env.NEXT_PUBLIC_BFF_BASE_URL ?? '';
+
+/** 목업 모드 여부 (BFF 미설정 시 동일 오리진 목업 사용). */
+export const isMockMode = (): boolean => BFF_BASE_URL === '';
+
+/** 계약 경로를 BFF 베이스 URL 에 결합한다. 목업 모드에선 상대경로(동일 오리진). */
+export const bffUrl = (path: string): string => `${BFF_BASE_URL}${path}`;
+
+/**
+ * 서버 컴포넌트가 쓰는 베이스 URL. BFF_BASE_URL은 브라우저가 보는 공개 주소라
+ * 컨테이너 안에서는 자기 자신을 가리켜 ConnectionRefused가 난다 — 도커로 띄울 때만
+ * 주입되는 내부 주소(BFF_INTERNAL_URL)를 먼저 쓰고, 없으면 공개 주소로 되돌아간다.
+ */
+const SERVER_BFF_BASE_URL = process.env.BFF_INTERNAL_URL ?? BFF_BASE_URL;
+
+/** 계약 경로를 서버용 BFF 베이스 URL 에 결합한다. 서버 컴포넌트 전용. */
+export const serverBffUrl = (path: string): string =>
+  `${SERVER_BFF_BASE_URL}${path}`;
+
+export const CHAT_STREAM_PATH = '/api/chat/stream';
+export const CHAT_CITATIONS_PATH = '/api/chat/citations';
+export const CHAT_SESSIONS_PATH = '/api/chat/sessions';
+
+/** 세션별 대화 이력 조회 경로. */
+export const chatSessionMessagesPath = (sessionId: string): string =>
+  `${CHAT_SESSIONS_PATH}/${sessionId}/messages`;
+
+/** 단일 세션 경로 — 삭제(DELETE)·이름변경(PATCH)에 쓴다. */
+export const chatSessionPath = (sessionId: string): string =>
+  `${CHAT_SESSIONS_PATH}/${sessionId}`;

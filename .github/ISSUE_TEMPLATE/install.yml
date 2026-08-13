@@ -1,0 +1,70 @@
+name: 설치·실행이 막혔어요
+description: 가이드를 따라가다 진행이 안 될 때
+labels: [install]
+body:
+  - type: dropdown
+    id: method
+    attributes:
+      label: 설치 방식
+      options:
+        - docker compose (INSTALL.md)
+        - caddy 리버스 프록시 (INSTALL_r-proxy.md)
+        - 개발 환경 구성 (CONTRIBUTING.md)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 운영체제
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 버전
+      description: '`git rev-parse --short HEAD` 출력'
+      placeholder: 예) a1b2c3d
+    validations:
+      required: true
+
+  - type: input
+    id: step
+    attributes:
+      label: 어느 단계에서 막혔나요
+      placeholder: 예) INSTALL.md 3단계, docker compose up -d --build
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 무슨 일이 일어났나요
+      description: 화면에 나온 메시지를 그대로 붙여주시면 가장 좋습니다.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그
+      description: |
+        도커로 띄웠다면 `docker compose logs <서비스이름>` 출력을, 프론트·BFF를
+        호스트에서 직접 띄웠다면 그 터미널 출력을 붙여주세요.
+
+        ⚠️ **붙이기 전에 비밀값을 지워주세요.** 로그에는 `.env`에 적은 비밀번호·
+        시크릿·API 키가 그대로 찍힐 수 있고, 이슈는 누구나 볼 수 있습니다.
+      render: shell
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 확인
+      options:
+        - label: 붙여넣은 내용에 비밀번호·시크릿·API 키가 없습니다
+          required: true

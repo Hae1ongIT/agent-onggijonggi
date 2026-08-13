@@ -1,0 +1,71 @@
+name: 버그 리포트
+description: 설치는 됐는데 동작이 잘못될 때
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: 어디에서
+      options:
+        - 로그인·인증
+        - 채팅·스트리밍
+        - 화면(UI)
+        - 도커·인프라
+        - 그 밖에
+    validations:
+      required: true
+
+  - type: dropdown
+    id: method
+    attributes:
+      label: 설치 방식
+      options:
+        - docker compose (INSTALL.md)
+        - caddy 리버스 프록시 (INSTALL_r-proxy.md)
+        - 개발 환경 구성 (CONTRIBUTING.md)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 버전
+      description: '`git rev-parse --short HEAD` 출력'
+      placeholder: 예) a1b2c3d
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 절차
+      placeholder: |
+        1. 로그인한다
+        2. 새 대화에서 질문을 보낸다
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대한 결과와 실제 결과
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그
+      description: |
+        ⚠️ **붙이기 전에 비밀값을 지워주세요.** 로그에는 `.env`에 적은 비밀번호·
+        시크릿·API 키가 그대로 찍힐 수 있고, 이슈는 누구나 볼 수 있습니다.
+      render: shell
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 확인
+      options:
+        - label: 붙여넣은 내용에 비밀번호·시크릿·API 키가 없습니다
+          required: true

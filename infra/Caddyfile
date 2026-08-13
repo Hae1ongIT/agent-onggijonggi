@@ -1,0 +1,15 @@
+{
+    local_certs
+}
+
+app.localhost {
+    reverse_proxy nextjs:3000
+}
+
+api.localhost {
+    reverse_proxy bff:8090
+}
+
+auth.localhost {
+    reverse_proxy keycloak:8080
+}

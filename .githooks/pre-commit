@@ -1,0 +1,27 @@
+#!/bin/sh
+# .githooks/pre-commit
+# 커밋될 내용의 DB 식별자가 축약 사전(scripts/glossary/data-glossary.md)에 등재됐는지 검사한다.
+#
+# 설치(개발자마다 1회):  git config core.hooksPath .githooks
+#
+# 판정은 scripts/validate-glossary.mjs 하나만 쓴다 — CI와 결과가 갈리지 않게.
+
+# node가 없는 환경에서 커밋 자체를 막지는 않는다. 최종 게이트는 CI다.
+if ! command -v node >/dev/null 2>&1; then
+	echo "[pre-commit] node가 없어 용어집 검사를 건너뜁니다(최종 검사는 CI에서 수행)." >&2
+	exit 0
+fi
+
+if ! node scripts/validate-glossary.mjs --staged; then
+	echo "" >&2
+	echo "[pre-commit] 커밋을 중단했습니다. scripts/glossary/words.md에 단어를 등재한 뒤" >&2
+	echo "             node scripts/build-glossary.mjs 로 사전을 재생성하세요." >&2
+	exit 1
+fi
+
+if ! node scripts/validate-invariants.mjs --staged; then
+	echo "" >&2
+	echo "[pre-commit] 커밋을 중단했습니다. 설계 불변식을 깨는 변경입니다." >&2
+	echo "             불변식 목록: scripts/validate-invariants.mjs 상단 주석" >&2
+	exit 1
+fi

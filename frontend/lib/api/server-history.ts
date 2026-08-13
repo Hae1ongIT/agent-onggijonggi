@@ -1,0 +1,76 @@
+/********************************************************
+ 파일명 : server-history.ts (lib/api)
+ 설 명 : 서버 컴포넌트 전용 채팅 이력 조회. http.ts의 authFetch는 클라이언트 전용 getSession()을
+ 써서 서버 컴포넌트에선 못 쓴다 — 여기선 @/auth의 auth()(서버사이드)로 세션을 얻어
+ accessToken을 직접 Bearer로 붙인다. SSR 1회성 조회라 401 재시도·429 백오프는 두지 않는다.
+ 인증 만료(session.error·401)는 REAUTH_REQUIRED로 구분해 null을 반환한다 — 호출부가 이를
+ "빈 목록"과 구분해 재인증 안내를 보여줄 수 있어야 한다.
+ *********************************************************/
+
+import { auth } from '@/auth';
+import {
+  CHAT_SESSIONS_PATH,
+  chatSessionMessagesPath,
+  serverBffUrl,
+} from './config';
+
+const REAUTH_REQUIRED = Symbol('reauth-required');
+
+/** GET /api/chat/sessions 응답 항목. */
+export interface ChatSessSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /api/chat/sessions/{id}/messages 응답 항목. */
+export interface ChatMsgItem {
+  id: string;
+  role: string;
+  content: string;
+  createdAt: string;
+}
+
+/**
+ * 인증 세션의 accessToken을 Bearer로 붙여 BFF를 GET한다. 세션이 없으면 null,
+ * 리프레시 실패(session.error)나 401 응답이면 REAUTH_REQUIRED를 반환한다 — 둘 다
+ * "재인증 필요"를 뜻하지만 세션이 아예 없는 경우(미들웨어가 이미 걸러내는 경로)와는
+ * 구분해둔다.
+ */
+async function authorizedGet(
+  path: string,
+): Promise<Response | null | typeof REAUTH_REQUIRED> {
+  const session = await auth();
+  if (!session?.accessToken) return null;
+  // 리프레시가 이미 실패로 확정된 세션은 401로 왕복할 뿐이니 요청 자체를 생략한다.
+  if (session.error === 'RefreshAccessTokenError') return REAUTH_REQUIRED;
+  const res = await fetch(serverBffUrl(path), {
+    headers: { Authorization: `Bearer ${session.accessToken}` },
+    cache: 'no-store',
+  });
+  if (res.status === 401) return REAUTH_REQUIRED;
+  return res;
+}
+
+/** 로그인 사용자의 세션 목록을 서버 컴포넌트에서 미리 조회한다(사이드바 초기 렌더용).
+ * 반환 null은 "재인증 필요"를 뜻한다 — 진짜 빈 목록([])과 호출부가 구분해야 한다. */
+export async function fetchSessionsForServer(): Promise<
+  ChatSessSummary[] | null
+> {
+  const res = await authorizedGet(CHAT_SESSIONS_PATH);
+  if (res === REAUTH_REQUIRED) return null;
+  if (!res?.ok) return [];
+  return res.json() as Promise<ChatSessSummary[]>;
+}
+
+/** 특정 세션의 메시지 목록을 서버 컴포넌트에서 미리 조회한다(chat/[id] 진입 시 초기 메시지용).
+ * 반환 null은 "재인증 필요"를 뜻한다 — 진짜 빈 목록([])과 호출부가 구분해야 한다. */
+export async function fetchSessionMessagesForServer(
+  sessionId: string,
+): Promise<ChatMsgItem[] | null> {
+  const res = await authorizedGet(chatSessionMessagesPath(sessionId));
+  if (res === REAUTH_REQUIRED) return null;
+  if (!res?.ok) return [];
+  return res.json() as Promise<ChatMsgItem[]>;
+}
