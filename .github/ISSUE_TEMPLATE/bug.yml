@@ -1,6 +1,7 @@
 name: 버그 리포트
 description: 설치는 됐는데 동작이 잘못될 때
 labels: [bug]
+type: Bug
 body:
   - type: dropdown
     id: area

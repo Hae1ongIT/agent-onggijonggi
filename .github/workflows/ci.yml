@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # 마이그레이션 SQL의 DB 식별자·설계 불변식 검사.
+  # .githooks/pre-commit이 커밋 시점에 돌리는 것과 같은 스크립트를 쓴다 — 판정이 갈리지 않게.
+  # 훅을 설치하지 않았거나(`git config core.hooksPath .githooks`) 우회한 커밋은 여기서 걸린다.
+  migration-sql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 훅은 `--staged`(인덱스)를 읽지만 CI 체크아웃에는 스테이징된 내용이 없다.
+      # 그래서 마이그레이션 파일 전체를 인자로 넘긴다.
+      - name: 용어집 검사
+        run: node scripts/validate-glossary.mjs backend/common/bff-web/src/main/resources/db/migration/*.sql
+
+      - name: 설계 불변식 검사
+        run: node scripts/validate-invariants.mjs backend/common/bff-web/src/main/resources/db/migration/*.sql
+
+  # TODO: backend — `cd backend/common/bff-web && ./gradlew build` (JDK 17, test 포함)
+  # TODO: frontend — `cd frontend && bun install && bun lint:check`

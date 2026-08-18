@@ -61,7 +61,8 @@ docker compose up -d --build                   # ③ 전체 기동 (첫 빌드 5
 |---|---|
 | [INSTALL.md](INSTALL.md) | **처음 띄울 때.** Docker로 전체 스택 셀프 호스팅 (`http://localhost:3010`) |
 | [INSTALL_r-proxy.md](INSTALL_r-proxy.md) | **HTTPS가 필요할 때.** caddy를 얹어 `https://app.localhost`로 쓰는 방법 — INSTALL.md에서 달라지는 곳만 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | **코드를 고칠 때.** 프론트·BFF를 호스트에서 직접 띄우는 개발 환경 구성 |
+| [ROADMAP.md](ROADMAP.md) | **어디까지 되는지 알고 싶을 때.** 지금 버전의 한계와 다음 방향 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | **코드를 고칠 때.** 이슈·브랜치·커밋·PR 절차와, 프론트·BFF를 호스트에서 직접 띄우는 개발 환경 구성 |
 | [`frontend/README.md`](frontend/README.md) | 프론트엔드 계층의 역할·스택과 동작 메모 |
 
 계층 구조는 코드와 주석에서 `01·CLIENT` ~ `06·DOCUMENT` 번호로 참조한다 — 01은 `frontend/`, 02·EDGE와 03·CORE는 `backend/common/bff-web/`의 `security/`·`chat/`, 04·DATA는 스키마·엔티티, 05·INFRA는 `infra/`, 06·DOCUMENT는 `worker/`(예약)에 해당한다.

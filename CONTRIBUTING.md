@@ -1,7 +1,130 @@
 # 기여 안내
 
-앞쪽은 **개발 환경 구성**, 뒤쪽은 [**기여 절차**](#이슈-먼저)다. 앱을 쓰기만 할 거라면
+앞쪽은 **기여 절차**, 뒤쪽은 [**개발 환경 구성**](#개발-환경-구성)이다. 앱을 쓰기만 할 거라면
 [INSTALL.md](INSTALL.md)로 도커 스택을 띄우는 편이 빠르다.
+
+문서·이슈·커밋은 한국어를 기본으로 쓴다. 영어로 보내주셔도 된다.
+
+---
+
+# 기여 절차
+
+## 시작하기 전에
+
+이 저장소는 [행동 규범](CODE_OF_CONDUCT.md)을 따른다.
+
+무엇이 필요한지는 [ROADMAP.md](ROADMAP.md)에 있다 — 지금 버전의 한계와 다음에 만들 것을 적어두었다.
+
+## 이슈 먼저
+
+버그든 기능이든 이슈를 먼저 연다. 브랜치 이름에 그 번호를 쓴다.
+
+**의존성 추가·아키텍처 변경·큰 리팩터링은 코드를 쓰기 전에 이슈에서 합의한다** — 방향이 갈리면
+다 만들어온 작업이 통째로 버려진다.
+
+**보안 취약점은 예외다** — 공개 이슈로 열지 않는다. [SECURITY.md](SECURITY.md)의 비공개 통로를 쓴다.
+
+이슈를 열면 종류에 따라 양식이 나온다. 미리 준비해두면 오가는 횟수가 준다.
+
+- **버그** — 재현 절차, 기대한 결과와 실제 결과, 버전(`git rev-parse --short HEAD`), 로그
+- **설치·실행이 막혔을 때** — 운영체제, 설치 방식, 막힌 단계, 로그
+- **기능 제안** — 지금 무엇이 불편한지, 어떻게 되면 좋겠는지
+- **질문** — 무엇이 궁금한지, 무엇을 하려다 막혔는지
+
+로그를 붙이기 전에 `.env`의 비밀번호·시크릿·API 키가 섞이지 않았는지 확인한다 — 이슈는 누구나 볼 수 있다.
+
+## 포크
+
+저장소에 쓰기 권한이 없다면 포크에서 작업한다. GitHub에서 **Fork**를 누르고 자기 계정의
+사본을 클론한 뒤, 원본을 `upstream`으로 등록해 둔다.
+
+```bash
+git clone https://github.com/<내-계정>/agent-onggijonggi.git
+cd agent-onggijonggi
+git remote add upstream https://github.com/SUNJOOSOFT/agent-onggijonggi.git
+```
+
+## 브랜치
+
+`main`에서 따고 `<이슈번호>-<짧은-설명>`으로 이름 짓는다.
+
+```
+42-session-rename
+57-token-audience-npe
+```
+
+포크에서 작업한다면 원본의 최신 `main`에서 딴다.
+
+```bash
+git fetch upstream
+git checkout -b 42-session-rename upstream/main
+```
+
+## 코드 스타일
+
+**백엔드** — 자바 클래스에는 파일 상단에 이 헤더를 둔다. 저장소의 모든 자바 파일이 지키고 있다.
+
+```java
+/**
+ * Class Name : ChatController.java
+ * Description : 01·CLIENT ↔ 03·CORE 채팅 스트리밍·이력 조회 계약 구현체.
+ *               02·EDGE(SecurityConfig)가 JWT 인증·hasRole("USER")를 필터체인에서 이미 강제한다.
+ */
+```
+
+`Description`에 나오는 `01·CLIENT`·`03·CORE` 같은 계층 번호는 [README의 문서 절](README.md#문서)에
+설명이 있다. 그 밖의 포맷은 자동 검사가 없으니 고치는 파일의 기존 스타일을 따른다.
+
+**프론트엔드** — biome가 정한다(`frontend/biome.jsonc`). `bun format`은 **자기가 고친 파일에만**
+돌린다 — 저장소 전체에 돌리면 지금은 무관한 파일까지 바뀐다.
+
+## 테스트
+
+동작이 바뀌는 변경에는 테스트를 붙인다. 붙이기 어렵다면 PR에 왜 어려운지 적는다 — 거기서부터
+이야기하면 된다.
+
+백엔드 테스트는 H2로 돌아 DB나 Keycloak을 띄우지 않아도 된다. `gradlew build`에 테스트가 포함되므로
+따로 `test`를 돌릴 필요는 없다(개별 실행은 [5. BFF](#5-bff) 참고).
+
+프론트엔드는 아직 테스트 하네스가 없다 — 검사는 `bun lint:check`가 전부다.
+
+## 커밋
+
+```
+타입(scope): 요약
+```
+
+타입은 `feat` `fix` `docs` `test` `chore` `refactor`, scope는 `frontend` `bff` `worker` `infra`
+`docs` `scripts` 중 하나를 쓰고 여러 곳에 걸치면 생략한다.
+
+```
+feat(bff): 세션 이름변경 엔드포인트 추가
+fix(frontend): aud 클레임 없는 토큰 NPE 수정
+docs: 빠른 시작 누락 단계 보완
+```
+
+## PR
+
+`main`으로 보낸다. **PR 제목도 커밋과 같은 `타입(scope): 요약` 규칙으로 쓴다** — squash 머지라
+제목이 그대로 `main`의 커밋 메시지가 된다.
+
+본문의 `Closes #`에 이슈 번호를 적으면 머지될 때 이슈가 함께 닫힌다. 이슈를 닫는 PR이 아니면
+`Refs #`로 바꾼다.
+
+- [ ] `gradlew build` 통과 (백엔드를 고쳤다면 — 테스트가 함께 돈다)
+- [ ] `bun lint:check` 통과 (프론트를 고쳤다면)
+- [ ] 동작이 바뀌었다면 테스트를 붙였다 (어렵다면 그 이유를 PR에 적는다)
+- [ ] 관련 문서를 함께 고쳤다
+
+PR을 열면 마이그레이션 SQL 검사가 자동으로 돈다. 나머지 항목은 아직 자동 검사가 없으니 직접 확인한다.
+
+승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `main`에 커밋 하나로 남는다.
+리뷰가 오래 조용하면 PR에 댓글로 깨워주면 된다.
+
+## 라이선스
+
+이 저장소에 보낸 기여는, 명시적으로 달리 밝히지 않는 한 [Apache License 2.0](LICENSE)으로 제공하는
+것으로 본다(Apache-2.0 §5). CLA나 DCO 서명은 요구하지 않는다.
 
 ---
 
@@ -33,7 +156,14 @@
 git config core.hooksPath .githooks
 ```
 
-마이그레이션 SQL을 커밋할 때 DB 식별자 이름과 설계 불변식을 검사한다.
+마이그레이션 SQL을 커밋할 때 DB 식별자 이름과 설계 불변식을 검사한다. 걸렸다면 푸는 방법이 둘로 갈린다.
+
+- **용어집** — 아직 사전에 없는 단어를 썼다. [`scripts/glossary/words.md`](scripts/glossary/words.md)에
+  단어를 등재하고 `node scripts/build-glossary.mjs`로 사전을 다시 만든 뒤 커밋한다.
+- **설계 불변식** — 설계 계약을 깨는 변경이다. 등재로는 풀리지 않으니 설계를 바꿔야 한다. 무엇을
+  왜 막는지는 `scripts/validate-invariants.mjs` 상단 주석에 적혀 있다.
+
+훅을 설치하지 않았거나 우회했더라도 PR에서 CI가 같은 검사를 돌린다.
 
 ---
 
@@ -184,7 +314,7 @@ bun dev
 
 `http://localhost:3000` → `devuser` / `devpass123`
 
-lint·format은 `bun lint` · `bun format`.
+검사는 `bun lint:check`, 자동 수정은 `bun lint` · `bun format`이다.
 
 ---
 
@@ -207,49 +337,3 @@ docker stop dev-keycloak dev-postgres     # 프론트·BFF는 Ctrl+C
 - **`ClassNotFoundException: ...GradleWorkerMain`** — 테스트 워커가 Gradle 자신의 클래스를 못 찾는 경우다. 홈 경로에 한글 등 ASCII 밖 문자가 있으면 Windows에서 나타난다. 저장소와 `GRADLE_USER_HOME`을 ASCII 경로로 옮기거나, 컨테이너 안에서 돌린다 — `docker run --rm -v "$PWD:/src:ro" -w /work eclipse-temurin:17-jdk sh -c "cp -r /src /work/p && cd /work/p && ./gradlew test --no-daemon"`
 
 Keycloak 설정을 고쳤다면 로그아웃 후 다시 로그인한다 — 이미 발급된 토큰은 바뀌지 않는다.
-
----
-
-# 기여 절차
-
-## 이슈 먼저
-
-버그든 기능이든 이슈를 먼저 연다. 브랜치 이름에 그 번호를 쓴다.
-
-**보안 취약점은 예외다** — 공개 이슈로 열지 않는다. [SECURITY.md](SECURITY.md)의 비공개 통로를 쓴다.
-
-## 브랜치
-
-`main`에서 따고 `<이슈번호>-<짧은-설명>`으로 이름 짓는다.
-
-```
-42-session-rename
-57-token-audience-npe
-```
-
-## 커밋
-
-```
-타입(scope): 요약
-```
-
-타입은 `feat` `fix` `docs` `chore` `refactor`, scope는 `frontend` `bff` `infra` `docs`
-`scripts` 중 하나를 쓰고 여러 곳에 걸치면 생략한다.
-
-```
-feat(bff): 세션 이름변경 엔드포인트 추가
-fix(frontend): aud 클레임 없는 토큰 NPE 수정
-docs: 빠른 시작 누락 단계 보완
-```
-
-## PR
-
-`main`으로 보낸다. 승인 1명이면 머지한다.
-
-- [ ] `gradlew build` 통과 (백엔드를 고쳤다면)
-- [ ] `bun lint` 통과 (프론트를 고쳤다면)
-- [ ] 관련 문서를 함께 고쳤다
-
-## 라이선스
-
-이 저장소에 보낸 기여는 [Apache License 2.0](LICENSE)으로 제공하는 것으로 본다.

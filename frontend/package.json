@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "biome lint --write --unsafe --diagnostic-level=error",
     "lint:fix": "biome lint --write --unsafe --diagnostic-level=error",
+    "lint:check": "biome lint --diagnostic-level=error .",
     "format": "biome format --write --diagnostic-level=error"
   },
   "dependencies": {

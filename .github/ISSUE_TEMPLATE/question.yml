@@ -1,0 +1,40 @@
+name: 질문
+description: 버그도 설치 문제도 아닌, 쓰는 방법이나 구조에 대한 질문
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        설치를 따라가다 막힌 것이라면 **설치·실행이 막혔어요** 양식이 더 빠릅니다.
+        보안 취약점은 공개 이슈로 올리지 마세요 — [SECURITY.md](../blob/main/SECURITY.md)의
+        비공개 통로를 씁니다.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 무엇이 궁금한가요
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 어떤 상황인가요
+      description: |
+        무엇을 하려다 궁금해졌는지 적어주시면 답이 정확해집니다.
+        이미 찾아본 문서나 시도해본 것이 있다면 함께 적어주세요.
+
+  - type: input
+    id: version
+    attributes:
+      label: 버전
+      description: '`git rev-parse --short HEAD` 출력 — 코드나 동작에 대한 질문이라면'
+      placeholder: 예) a1b2c3d
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 확인
+      options:
+        - label: 붙여넣은 내용에 비밀번호·시크릿·API 키가 없습니다
+          required: true
