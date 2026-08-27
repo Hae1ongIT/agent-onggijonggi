@@ -1,0 +1,26 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 16 16"
+  role="img"
+  aria-labelledby="onggijonggi-mark-16-title"
+>
+  <title id="onggijonggi-mark-16-title">옹기종기 16픽셀 파비콘</title>
+  <path
+    fill="#243A5A"
+    d="M3 1h10c1.105 0 2 .895 2 2v7c0 1.105-.895 2-2 2H9.5L7 15l.8-3H3c-1.105 0-2-.895-2-2V3c0-1.105.895-2 2-2Z"
+  />
+  <circle
+    cx="5.5"
+    cy="6"
+    r="2.25"
+    fill="#FF765E"
+  />
+  <rect
+    x="8.2"
+    y="3.75"
+    width="4.5"
+    height="4.5"
+    rx="1.15"
+    fill="#F7F9FC"
+  />
+</svg>
