@@ -1,0 +1,40 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 64 64"
+  role="img"
+  aria-labelledby="onggijonggi-mark-title"
+>
+  <title id="onggijonggi-mark-title">옹기종기 파비콘</title>
+  <path
+    fill="#243A5A"
+    d="M13 5h38c5.523 0 10 4.477 10 10v27c0 5.523-4.477 10-10 10H35L22 60l3-8H13C7.477 52 3 47.523 3 42V15C3 9.477 7.477 5 13 5Z"
+  />
+  <circle
+    cx="24"
+    cy="25"
+    r="6.5"
+    fill="#FF765E"
+  />
+  <rect
+    x="32"
+    y="18.5"
+    width="13"
+    height="13"
+    rx="3"
+    fill="#F7F9FC"
+  />
+  <rect
+    x="18.5"
+    y="32"
+    width="13"
+    height="13"
+    rx="3"
+    fill="#F7F9FC"
+  />
+  <circle
+    cx="40.5"
+    cy="39.5"
+    r="6.5"
+    fill="#FF765E"
+  />
+</svg>
