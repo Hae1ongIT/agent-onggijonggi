@@ -25,6 +25,7 @@
 | `access` | 접근 |
 | `answer` | 답변 |
 | `app` | 애플리케이션 |
+| `archived` | 보관됨 |
 | `at` | 시점 |
 | `attempt` | 시도 |
 | `audit` | 감사 |
@@ -36,6 +37,7 @@
 | `count` | 개수 |
 | `created` | 생성됨 |
 | `dim` | 차원 |
+| `direct` | 1:1 |
 | `document` | 문서 |
 | `embedding` | 임베딩 |
 | `error` | 오류 |
@@ -44,8 +46,10 @@
 | `indexing` | 색인 실행 |
 | `json` | JSON |
 | `key` | 키 |
+| `kind` | 종류 |
 | `last` | 마지막 |
 | `location` | 위치 |
+| `locked` | 잠김 |
 | `log` | 로그 |
 | `member` | 회원 |
 | `message` | 메시지 |
@@ -54,6 +58,7 @@
 | `next` | 다음 |
 | `original` | 원본 |
 | `outcome` | 결과 |
+| `owner` | 소유자 |
 | `path` | 경로 |
 | `pending` | 대기 중 |
 | `question` | 질문 |
@@ -65,6 +70,7 @@
 | `subject` | 주체 식별자 |
 | `tag` | 태그 |
 | `text` | 텍스트 |
+| `thread` | 대화 스레드 |
 | `title` | 제목 |
 | `trace` | 추적 |
 | `updated` | 수정됨 |
@@ -104,6 +110,8 @@
 | `fingerprint` | `fgpt` | 관용어 — 알고리즘 결과 `fng`가 의미 불명확, 4자로 늘려 가독성 확보 |
 | `deleted` | `deleted` | 관용 유지 — `deleted_at`/`deleted_by` 대칭, 기존 `created`/`updated`/`indexed`/`uploaded`와 동일 패턴 |
 | `sequence` | `seq` | 관용어 — 알고리즘 결과 `sqn`이 불명확, 업계 통용 축약 |
+| `locked` | `locked` | 관용 유지 — `locked_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
+| `archived` | `archived` | 관용 유지 — `archived_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 
 ### 복수형 정책
 

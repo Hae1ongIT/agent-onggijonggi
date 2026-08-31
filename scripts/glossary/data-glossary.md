@@ -10,6 +10,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `acc` | `access` | 접근 | 알고리즘 | - |
 | `ans` | `answer` | 답변 | 알고리즘 | - |
 | `app` | `app` | 애플리케이션 | 알고리즘 | - |
+| `archived` | `archived` | 보관됨 | 예외 | 관용 유지 — `archived_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 | `at` | `at` | 시점 | 알고리즘 | - |
 | `att` | `attempt` | 시도 | 알고리즘 | - |
 | `adt` | `audit` | 감사 | 알고리즘 | - |
@@ -24,6 +25,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `deleted` | `deleted` | - | 예외 | 관용 유지 — `deleted_at`/`deleted_by` 대칭, 기존 `created`/`updated`/`indexed`/`uploaded`와 동일 패턴 |
 | `dept` | `department` | - | 예외 | 관용어 — 알고리즘 결과 `dpr`이 불명확 |
 | `dim` | `dim` | 차원 | 알고리즘 | - |
+| `drc` | `direct` | 1:1 | 알고리즘 | - |
 | `doc` | `document` | 문서 | 예외 | 관용어 — 알고리즘은 `dcm` |
 | `emb` | `embedding` | 임베딩 | 알고리즘 | - |
 | `err` | `error` | 오류 | 알고리즘 | - |
@@ -35,8 +37,10 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `json` | `json` | JSON | 알고리즘 | - |
 | `key` | `key` | 키 | 알고리즘 | - |
 | `keycloak` | `keycloak` | - | 예외 | 고유명사 — 축약하지 않음 |
+| `kind` | `kind` | 종류 | 알고리즘 | - |
 | `last` | `last` | 마지막 | 알고리즘 | - |
 | `loc` | `location` | 위치 | 예외 | 관용어 — 알고리즘은 `lct` |
+| `locked` | `locked` | 잠김 | 예외 | 관용 유지 — `locked_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 | `log` | `log` | 로그 | 알고리즘 | - |
 | `mbr` | `member` | 회원 | 예외 | 관용어 — 알고리즘은 `mmb` |
 | `msg` | `message` | 메시지 | 예외 | 관용어 — 알고리즘은 `mss` |
@@ -45,6 +49,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `next` | `next` | 다음 | 알고리즘 | - |
 | `org` | `original` | 원본 | 알고리즘 | - |
 | `otc` | `outcome` | 결과 | 알고리즘 | - |
+| `own` | `owner` | 소유자 | 알고리즘 | - |
 | `pw` | `password` | - | 예외 | 관용어(팀 합의) |
 | `path` | `path` | 경로 | 알고리즘 | - |
 | `pnd` | `pending` | 대기 중 | 알고리즘 | - |
@@ -59,6 +64,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `subj` | `subject` | 주체 식별자 | 예외 | 관용어 — 알고리즘은 `sbj` |
 | `tag` | `tag` | 태그 | 알고리즘 | - |
 | `text` | `text` | 텍스트 | 알고리즘 | - |
+| `thr` | `thread` | 대화 스레드 | 알고리즘 | - |
 | `title` | `title` | 제목 | 예외 | 알고리즘 `ttl`은 Time-To-Live로 통용돼 혼동 |
 | `trc` | `trace` | 추적 | 알고리즘 | - |
 | `updated` | `updated` | 수정됨 | 예외 | 관용 — `updated_at`은 범용 관례라 원형 유지 |
