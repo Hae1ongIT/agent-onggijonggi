@@ -81,7 +81,7 @@ class WsHandshakeRateLimitTest {
 		awaitWindowStart();
 
 		for (int i = 0; i < WS_LIMIT; i++) {
-			assertThat(connect(sub)).isEqualTo("connected:" + sub);
+			assertThat(connect(sub)).contains("\"type\":\"chat.message\"");
 		}
 
 		assertThatThrownBy(() -> connect(sub))
@@ -101,7 +101,7 @@ class WsHandshakeRateLimitTest {
 		awaitWindowStart();
 
 		for (int i = 0; i < WS_LIMIT; i++) {
-			assertThat(connect(sub)).isEqualTo("connected:" + sub);
+			assertThat(connect(sub)).contains("\"type\":\"chat.message\"");
 		}
 		assertThatThrownBy(() -> connect(sub))
 				.isInstanceOf(WebSocketClientHandshakeException.class)
@@ -150,7 +150,7 @@ class WsHandshakeRateLimitTest {
 
 	private RestTestClient.RequestHeadersSpec<?> probeWsPath(String token) {
 		return restTestClient.get()
-				.uri("/api/ws")
+				.uri("/api/ws/" + java.util.UUID.randomUUID())
 				.header("Sec-WebSocket-Protocol", "access_token, " + token);
 	}
 
@@ -163,7 +163,8 @@ class WsHandshakeRateLimitTest {
 		AtomicReference<String> received = new AtomicReference<>();
 
 		new ReactorNettyWebSocketClient()
-				.execute(URI.create("ws://localhost:" + port + "/api/ws"), headers, new WebSocketHandler() {
+				.execute(URI.create("ws://localhost:" + port + "/api/ws/" + java.util.UUID.randomUUID()),
+						headers, new WebSocketHandler() {
 
 					@Override
 					public List<String> getSubProtocols() {
@@ -172,10 +173,13 @@ class WsHandshakeRateLimitTest {
 
 					@Override
 					public Mono<Void> handle(WebSocketSession session) {
-						return session.receive()
+						Mono<Void> send = session.send(Mono.just(session.textMessage(
+								"{\"type\":\"chat.message\",\"content\":\"rate check\"}")));
+						Mono<Void> receive = session.receive()
 								.take(1)
 								.doOnNext(message -> received.set(message.getPayloadAsText()))
 								.then();
+						return Mono.when(send, receive);
 					}
 				})
 				.block(Duration.ofSeconds(5));
