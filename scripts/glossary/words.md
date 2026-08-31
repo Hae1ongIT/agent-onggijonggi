@@ -42,6 +42,7 @@
 | `embedding` | 임베딩 |
 | `error` | 오류 |
 | `file` | 파일 |
+| `inactive` | 비활성 |
 | `indexed` | 색인됨 |
 | `indexing` | 색인 실행 |
 | `json` | JSON |
@@ -112,6 +113,7 @@
 | `sequence` | `seq` | 관용어 — 알고리즘 결과 `sqn`이 불명확, 업계 통용 축약 |
 | `locked` | `locked` | 관용 유지 — `locked_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 | `archived` | `archived` | 관용 유지 — `archived_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
+| `inactive` | `inactive` | 관용 유지 — 알고리즘 결과 `inc`는 increment·include와 혼동. `inactive_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
 
 ### 복수형 정책
 
