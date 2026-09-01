@@ -166,7 +166,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 
 	static Flux<WsFrame> bufferForConnection(Flux<WsFrame> frames, Sinks.One<Void> outboundOverflow) {
 		return frames.onBackpressureBuffer(CONNECTION_BUFFER_SIZE,
-				ignored -> outboundOverflow.tryEmitEmpty(), BufferOverflowStrategy.ERROR);
+				ignored -> outboundOverflow.tryEmitEmpty(), BufferOverflowStrategy.DROP_LATEST);
 	}
 
 	static String textPayload(WebSocketMessage message) {

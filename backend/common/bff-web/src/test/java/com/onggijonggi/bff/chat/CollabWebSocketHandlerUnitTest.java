@@ -4,9 +4,12 @@ import java.net.URI;
 import java.security.Principal;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.reactivestreams.Subscription;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.web.reactive.socket.CloseStatus;
 import org.springframework.web.reactive.socket.HandshakeInfo;
@@ -14,6 +17,7 @@ import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.json.JsonMapper;
@@ -118,6 +122,59 @@ class CollabWebSocketHandlerUnitTest {
 		handler.handle(session).block(java.time.Duration.ofSeconds(1));
 
 		verify(session).close(argThat(status -> status.getCode() == 4000));
+	}
+
+	@Test
+	void closesTheSlowConsumerWithCode1011WhenItsOutboundBufferOverflows() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		UUID userId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry();
+		var provisioning = mock(com.onggijonggi.bff.user.UserProvisioningService.class);
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		Principal principal = () -> "slow-user";
+		CountDownLatch sendSubscribed = new CountDownLatch(1);
+		CountDownLatch closed = new CountDownLatch(1);
+		AtomicReference<CloseStatus> closeStatus = new AtomicReference<>();
+
+		when(handshakeInfo.getUri()).thenReturn(URI.create("ws://localhost/api/ws/" + threadId));
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just(principal));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("slow-user")).thenReturn(Mono.just(userId));
+		when(session.receive()).thenReturn(Flux.never());
+		when(session.send(any())).thenAnswer(invocation -> {
+			Flux.from(invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
+					.subscribe(new BaseSubscriber<>() {
+						@Override
+						protected void hookOnSubscribe(Subscription subscription) {
+							sendSubscribed.countDown();
+							// 느린 네트워크 write를 재현한다. 의도적으로 demand를 요청하지 않는다.
+						}
+					});
+			return Mono.never();
+		});
+		when(session.close(any(CloseStatus.class))).thenAnswer(invocation -> {
+			CloseStatus status = invocation.getArgument(0);
+			return Mono.fromRunnable(() -> {
+				closeStatus.set(status);
+				closed.countDown();
+			});
+		});
+
+		CollabWebSocketHandler handler = new CollabWebSocketHandler(new JsonMapper(), registry, provisioning);
+		var handlerSubscription = handler.handle(session).subscribe();
+		try {
+			assertThat(sendSubscribed.await(1, TimeUnit.SECONDS)).isTrue();
+			for (int i = 0; i <= 512 && closed.getCount() > 0; i++) {
+				registry.broadcast(threadId, new ChatMessageFrame(threadId, userId, "message-" + i));
+			}
+
+			assertThat(closed.await(1, TimeUnit.SECONDS)).isTrue();
+			assertThat(closeStatus.get().getCode()).isEqualTo(1011);
+			verify(session, times(1)).close(argThat(status -> status.getCode() == 1011));
+		} finally {
+			handlerSubscription.dispose();
+		}
 	}
 
 }
