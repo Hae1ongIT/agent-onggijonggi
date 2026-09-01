@@ -40,6 +40,8 @@
 | `direct` | 1:1 |
 | `document` | 문서 |
 | `embedding` | 임베딩 |
+| `end` | 종료 |
+| `ended` | 종료됨 |
 | `error` | 오류 |
 | `file` | 파일 |
 | `inactive` | 비활성 |
@@ -63,6 +65,7 @@
 | `path` | 경로 |
 | `pending` | 대기 중 |
 | `question` | 질문 |
+| `reason` | 사유 |
 | `requester` | 요청자 |
 | `role` | 역할 |
 | `run` | 실행 |
@@ -114,6 +117,7 @@
 | `locked` | `locked` | 관용 유지 — `locked_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 | `archived` | `archived` | 관용 유지 — `archived_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 | `inactive` | `inactive` | 관용 유지 — 알고리즘 결과 `inc`는 increment·include와 혼동. `inactive_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
+| `ended` | `ended` | 알고리즘 결과가 `end`(원형)와 충돌. `ended_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
 
 ### 복수형 정책
 
