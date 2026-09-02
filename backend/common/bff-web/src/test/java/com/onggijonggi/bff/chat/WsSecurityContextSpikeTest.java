@@ -107,12 +107,9 @@ class WsSecurityContextSpikeTest {
 
 		// execute()는 Mono<Void>라 에코 값을 안 돌려준다 — 핸들러 안에서 직접 꺼내 바깥 참조에 담는다.
 		// take(1)이 없으면 서버가 세션을 닫을 때까지 receive()가 안 끝나 타임아웃까지 대기한다.
-		client.execute(URI.create("ws://localhost:" + port + "/ws/spike"), headers, session -> session
-						.send(Mono.just(session.textMessage("ping")))
-						.thenMany(session.receive())
-						.take(1)
-						.doOnNext(message -> received.set(message.getPayloadAsText()))
-						.then())
+		client.execute(URI.create("ws://localhost:" + port + "/ws/spike"), headers,
+					session -> WsTestExchange.exchange(session, active -> Mono.just(active.textMessage("ping")), 1,
+							message -> received.set(message.getPayloadAsText())))
 				.block(Duration.ofSeconds(5));
 
 		assertThat(received.get()).isEqualTo("ctx=" + subject + ";handshake=" + subject);
