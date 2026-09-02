@@ -1,6 +1,7 @@
 package com.onggijonggi.bff.chat;
 
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,35 +23,51 @@ public class RoomSessionRegistry {
 
 	private final ConcurrentMap<UUID, RoomState> rooms = new ConcurrentHashMap<>();
 
-	public Flux<WsFrame> join(UUID threadId, UUID connectionId) {
+	public RoomMembership join(UUID threadId, UUID connectionId) {
 		RoomState room = rooms.compute(threadId, (ignored, current) -> {
 			RoomState joined = current == null ? new RoomState() : current;
 			joined.add(connectionId);
 			return joined;
 		});
-		return room.frames();
+		return new RoomMembership(room.generation(), room.frames());
 	}
 
-	public void broadcast(UUID threadId, WsFrame frame) {
+	/**
+	 * 현재 방 세대에만 프레임을 방송한다.
+	 *
+	 * @return 방이 없거나 generation이 달라 stale이면 {@code false}; 현재 sink 고장은 예외로 전파한다.
+	 */
+	public boolean broadcastIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
 		RoomState room = rooms.get(threadId);
-		if (room == null) {
-			throw new IllegalStateException("room is not registered: " + threadId);
+		if (room == null || !room.generation().equals(roomGeneration)) {
+			return false;
 		}
-		room.emit(frame);
+		return room.emitIfActive(frame);
 	}
 
-	public void leave(UUID threadId, UUID connectionId) {
+	/** @return 마지막 연결이 퇴장해 비워진 방 세대. */
+	public Optional<UUID> leave(UUID threadId, UUID connectionId) {
+		UUID[] emptiedGeneration = new UUID[1];
 		rooms.computeIfPresent(threadId, (ignored, current) -> {
 			if (!current.removeAndCompleteIfEmpty(connectionId)) {
 				return current;
 			}
+			emptiedGeneration[0] = current.generation();
 			return null;
 		});
+		return Optional.ofNullable(emptiedGeneration[0]);
+	}
+
+	public record RoomMembership(UUID generation, Flux<WsFrame> frames) {
 	}
 
 	private static final class RoomState {
 
 		private final Set<UUID> connections = new HashSet<>();
+
+		private final UUID generation = UUID.randomUUID();
+
+		private boolean active = true;
 
 		private final Sinks.Many<WsFrame> frames = Sinks.many()
 				.multicast()
@@ -60,11 +77,16 @@ public class RoomSessionRegistry {
 			connections.add(connectionId);
 		}
 
+		UUID generation() {
+			return generation;
+		}
+
 		synchronized boolean removeAndCompleteIfEmpty(UUID connectionId) {
 			connections.remove(connectionId);
 			if (!connections.isEmpty()) {
 				return false;
 			}
+			active = false;
 			frames.tryEmitComplete();
 			return true;
 		}
@@ -73,11 +95,15 @@ public class RoomSessionRegistry {
 			return frames.asFlux();
 		}
 
-		synchronized void emit(WsFrame frame) {
+		synchronized boolean emitIfActive(WsFrame frame) {
+			if (!active) {
+				return false;
+			}
 			Sinks.EmitResult result = frames.tryEmitNext(frame);
 			if (result.isFailure()) {
 				throw new IllegalStateException("room frame emission failed: " + result);
 			}
+			return true;
 		}
 	}
 

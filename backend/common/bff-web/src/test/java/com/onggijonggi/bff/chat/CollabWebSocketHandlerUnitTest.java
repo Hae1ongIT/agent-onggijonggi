@@ -2,6 +2,7 @@ package com.onggijonggi.bff.chat;
 
 import java.net.URI;
 import java.security.Principal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -20,6 +21,7 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -55,7 +57,7 @@ class CollabWebSocketHandlerUnitTest {
 		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		CollabWebSocketHandler handler = new CollabWebSocketHandler(new JsonMapper(), registry, provisioning);
+		CollabWebSocketHandler handler = handler(registry, provisioning);
 
 		handler.handle(session).block();
 
@@ -86,7 +88,7 @@ class CollabWebSocketHandlerUnitTest {
 				.doOnNext(message -> sent.set(message.getPayloadAsText())).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		CollabWebSocketHandler handler = new CollabWebSocketHandler(new JsonMapper(), registry, provisioning);
+		CollabWebSocketHandler handler = handler(registry, provisioning);
 
 		handler.handle(session).block();
 
@@ -117,7 +119,7 @@ class CollabWebSocketHandlerUnitTest {
 		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		CollabWebSocketHandler handler = new CollabWebSocketHandler(new JsonMapper(), registry, provisioning);
+		CollabWebSocketHandler handler = handler(registry, provisioning);
 
 		handler.handle(session).block(java.time.Duration.ofSeconds(1));
 
@@ -161,12 +163,16 @@ class CollabWebSocketHandlerUnitTest {
 			});
 		});
 
-		CollabWebSocketHandler handler = new CollabWebSocketHandler(new JsonMapper(), registry, provisioning);
+		UUID observerId = UUID.randomUUID();
+		RoomSessionRegistry.RoomMembership observer = registry.join(threadId, observerId);
+		var observerSubscription = observer.frames().subscribe();
+		CollabWebSocketHandler handler = handler(registry, provisioning);
 		var handlerSubscription = handler.handle(session).subscribe();
 		try {
 			assertThat(sendSubscribed.await(1, TimeUnit.SECONDS)).isTrue();
 			for (int i = 0; i <= 512 && closed.getCount() > 0; i++) {
-				registry.broadcast(threadId, new ChatMessageFrame(threadId, userId, "message-" + i));
+				registry.broadcastIfCurrent(threadId, observer.generation(),
+						new ChatMessageFrame(threadId, userId, "message-" + i));
 			}
 
 			assertThat(closed.await(1, TimeUnit.SECONDS)).isTrue();
@@ -174,7 +180,18 @@ class CollabWebSocketHandlerUnitTest {
 			verify(session, times(1)).close(argThat(status -> status.getCode() == 1011));
 		} finally {
 			handlerSubscription.dispose();
+			observerSubscription.dispose();
+			registry.leave(threadId, observerId);
 		}
+	}
+
+	private static CollabWebSocketHandler handler(RoomSessionRegistry registry,
+			com.onggijonggi.bff.user.UserProvisioningService provisioning) {
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.never());
+		CollabMessageDispatcher dispatcher = new CollabMessageDispatcher(registry, llm, "test-model",
+				Duration.ofSeconds(120), 20, Schedulers.parallel());
+		return new CollabWebSocketHandler(new JsonMapper(), registry, dispatcher, provisioning);
 	}
 
 }

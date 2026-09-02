@@ -30,12 +30,15 @@ class RoomSessionRegistryTest {
 		List<WsFrame> second = new CopyOnWriteArrayList<>();
 		List<WsFrame> other = new CopyOnWriteArrayList<>();
 
-		Disposable firstSubscription = registry.join(roomId, UUID.randomUUID()).subscribe(first::add);
-		Disposable secondSubscription = registry.join(roomId, UUID.randomUUID()).subscribe(second::add);
-		Disposable otherSubscription = registry.join(otherRoomId, UUID.randomUUID()).subscribe(other::add);
+		RoomSessionRegistry.RoomMembership firstMembership = registry.join(roomId, UUID.randomUUID());
+		RoomSessionRegistry.RoomMembership secondMembership = registry.join(roomId, UUID.randomUUID());
+		RoomSessionRegistry.RoomMembership otherMembership = registry.join(otherRoomId, UUID.randomUUID());
+		Disposable firstSubscription = firstMembership.frames().subscribe(first::add);
+		Disposable secondSubscription = secondMembership.frames().subscribe(second::add);
+		Disposable otherSubscription = otherMembership.frames().subscribe(other::add);
 
 		ChatMessageFrame expected = new ChatMessageFrame(roomId, sender, "hello");
-		registry.broadcast(roomId, expected);
+		assertThat(registry.broadcastIfCurrent(roomId, firstMembership.generation(), expected)).isTrue();
 		assertThat(first).containsExactly(expected);
 		assertThat(second).containsExactly(expected);
 		assertThat(other).isEmpty();
@@ -50,14 +53,16 @@ class RoomSessionRegistryTest {
 		UUID roomId = UUID.randomUUID();
 		List<WsFrame> first = new CopyOnWriteArrayList<>();
 		List<WsFrame> second = new CopyOnWriteArrayList<>();
-		Disposable firstSubscription = registry.join(roomId, UUID.randomUUID()).subscribe(first::add);
-		Disposable secondSubscription = registry.join(roomId, UUID.randomUUID()).subscribe(second::add);
+		RoomSessionRegistry.RoomMembership firstMembership = registry.join(roomId, UUID.randomUUID());
+		RoomSessionRegistry.RoomMembership secondMembership = registry.join(roomId, UUID.randomUUID());
+		Disposable firstSubscription = firstMembership.frames().subscribe(first::add);
+		Disposable secondSubscription = secondMembership.frames().subscribe(second::add);
 		CountDownLatch start = new CountDownLatch(1);
 		ExecutorService executor = Executors.newFixedThreadPool(2);
 
 		try {
-			Future<?> left = executor.submit(() -> broadcastRange(roomId, "left", start));
-			Future<?> right = executor.submit(() -> broadcastRange(roomId, "right", start));
+			Future<?> left = executor.submit(() -> broadcastRange(roomId, firstMembership.generation(), "left", start));
+			Future<?> right = executor.submit(() -> broadcastRange(roomId, firstMembership.generation(), "right", start));
 			start.countDown();
 			left.get(5, TimeUnit.SECONDS);
 			right.get(5, TimeUnit.SECONDS);
@@ -91,13 +96,16 @@ class RoomSessionRegistryTest {
 				// 연결별 버퍼를 채우기 위해 의도적으로 demand를 요청하지 않는다.
 			}
 		};
+		RoomSessionRegistry.RoomMembership slowMembership = registry.join(roomId, slowConnectionId);
+		RoomSessionRegistry.RoomMembership fastMembership = registry.join(roomId, fastConnectionId);
 		CollabWebSocketHandler.bufferForConnection(
-				registry.join(roomId, slowConnectionId), slowOverflow).subscribe(slowSubscriber);
+				slowMembership.frames(), slowOverflow).subscribe(slowSubscriber);
 		Disposable fastSubscription = CollabWebSocketHandler.bufferForConnection(
-				registry.join(roomId, fastConnectionId), fastOverflow).subscribe(fastFrames::add);
+				fastMembership.frames(), fastOverflow).subscribe(fastFrames::add);
 
 		for (int i = 0; i < 257; i++) {
-			registry.broadcast(roomId, new ChatMessageFrame(roomId, UUID.randomUUID(), "message-" + i));
+			registry.broadcastIfCurrent(roomId, slowMembership.generation(),
+					new ChatMessageFrame(roomId, UUID.randomUUID(), "message-" + i));
 		}
 
 		assertThat(slowOverflowed).isTrue();
@@ -114,15 +122,18 @@ class RoomSessionRegistryTest {
 	void aNewRoomStateSurvivesAfterThePreviousLastMemberLeaves() {
 		UUID roomId = UUID.randomUUID();
 		UUID oldConnectionId = UUID.randomUUID();
-		Disposable oldSubscription = registry.join(roomId, oldConnectionId).subscribe();
+		RoomSessionRegistry.RoomMembership oldMembership = registry.join(roomId, oldConnectionId);
+		Disposable oldSubscription = oldMembership.frames().subscribe();
 
 		registry.leave(roomId, oldConnectionId);
 		oldSubscription.dispose();
 
 		UUID newConnectionId = UUID.randomUUID();
 		List<WsFrame> received = new CopyOnWriteArrayList<>();
-		Disposable newSubscription = registry.join(roomId, newConnectionId).subscribe(received::add);
-		registry.broadcast(roomId, new ChatMessageFrame(roomId, UUID.randomUUID(), "new room"));
+		RoomSessionRegistry.RoomMembership newMembership = registry.join(roomId, newConnectionId);
+		Disposable newSubscription = newMembership.frames().subscribe(received::add);
+		assertThat(registry.broadcastIfCurrent(roomId, newMembership.generation(),
+				new ChatMessageFrame(roomId, UUID.randomUUID(), "new room"))).isTrue();
 
 		assertThat(received).hasSize(1);
 
@@ -130,15 +141,86 @@ class RoomSessionRegistryTest {
 		registry.leave(roomId, newConnectionId);
 	}
 
-	private void broadcastRange(UUID roomId, String prefix, CountDownLatch start) {
+	@Test
+	void staleGenerationCannotDeliverIntoARecreatedRoom() {
+		UUID roomId = UUID.randomUUID();
+		UUID oldConnectionId = UUID.randomUUID();
+		RoomSessionRegistry.RoomMembership oldMembership = registry.join(roomId, oldConnectionId);
+		Disposable oldSubscription = oldMembership.frames().subscribe();
+
+		assertThat(registry.leave(roomId, oldConnectionId)).contains(oldMembership.generation());
+		oldSubscription.dispose();
+
+		UUID newConnectionId = UUID.randomUUID();
+		List<WsFrame> received = new CopyOnWriteArrayList<>();
+		RoomSessionRegistry.RoomMembership newMembership = registry.join(roomId, newConnectionId);
+		Disposable newSubscription = newMembership.frames().subscribe(received::add);
+		try {
+			assertThat(newMembership.generation()).isNotEqualTo(oldMembership.generation());
+			assertThat(registry.broadcastIfCurrent(roomId, oldMembership.generation(),
+					new ChatMessageFrame(roomId, UUID.randomUUID(), "stale"))).isFalse();
+			assertThat(received).isEmpty();
+		} finally {
+			newSubscription.dispose();
+			registry.leave(roomId, newConnectionId);
+		}
+	}
+
+	@Test
+	void concurrentLastLeaveAndBroadcastNeverDeliverTheOldGenerationToANewRoom() throws Exception {
+		UUID roomId = UUID.randomUUID();
+		UUID oldConnectionId = UUID.randomUUID();
+		RoomSessionRegistry.RoomMembership oldMembership = registry.join(roomId, oldConnectionId);
+		Disposable oldSubscription = oldMembership.frames().subscribe();
+		CountDownLatch start = new CountDownLatch(1);
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+
+		try {
+			Future<?> leave = executor.submit(() -> {
+				await(start);
+				registry.leave(roomId, oldConnectionId);
+			});
+			Future<Boolean> broadcast = executor.submit(() -> {
+				await(start);
+				return registry.broadcastIfCurrent(roomId, oldMembership.generation(),
+						new ChatMessageFrame(roomId, UUID.randomUUID(), "racing"));
+			});
+			start.countDown();
+			leave.get(5, TimeUnit.SECONDS);
+			broadcast.get(5, TimeUnit.SECONDS);
+
+			UUID newConnectionId = UUID.randomUUID();
+			List<WsFrame> received = new CopyOnWriteArrayList<>();
+			RoomSessionRegistry.RoomMembership newMembership = registry.join(roomId, newConnectionId);
+			Disposable newSubscription = newMembership.frames().subscribe(received::add);
+			try {
+				assertThat(registry.broadcastIfCurrent(roomId, oldMembership.generation(),
+						new ChatMessageFrame(roomId, UUID.randomUUID(), "stale"))).isFalse();
+				assertThat(received).isEmpty();
+			} finally {
+				newSubscription.dispose();
+				registry.leave(roomId, newConnectionId);
+			}
+		} finally {
+			executor.shutdownNow();
+			oldSubscription.dispose();
+		}
+	}
+
+	private void broadcastRange(UUID roomId, UUID roomGeneration, String prefix, CountDownLatch start) {
+		await(start);
+		for (int i = 0; i < 100; i++) {
+			registry.broadcastIfCurrent(roomId, roomGeneration,
+					new ChatMessageFrame(roomId, UUID.randomUUID(), prefix + i));
+		}
+	}
+
+	private static void await(CountDownLatch start) {
 		try {
 			start.await(5, TimeUnit.SECONDS);
 		} catch (InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			throw new IllegalStateException(interrupted);
-		}
-		for (int i = 0; i < 100; i++) {
-			registry.broadcast(roomId, new ChatMessageFrame(roomId, UUID.randomUUID(), prefix + i));
 		}
 	}
 
