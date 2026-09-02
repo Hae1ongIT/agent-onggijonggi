@@ -23,7 +23,10 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import tools.jackson.databind.ObjectMapper;
 
-/** WebSocket 메시지 루프 전체를 소유한다. 레지스트리에는 방 프레임 흐름만 요청하고 세션을 넘기지 않는다. */
+/**
+ * Class Name : CollabWebSocketHandler.java
+ * Description : 협업 채팅 WebSocket 연결의 수신·송신 수명과 프레임 처리를 담당한다.
+ */
 @Component
 public class CollabWebSocketHandler implements WebSocketHandler {
 

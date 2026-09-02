@@ -13,6 +13,10 @@ import reactor.core.publisher.Sinks;
  * 방 구성원과 프레임 흐름만 관리한다. WebSocketSession은 {@link CollabWebSocketHandler}가 소유한다.
  *
  * <p>in-memory sink 기반이므로 단일 서버 프로세스만 지원한다. 다중 인스턴스는 pub/sub와 분산 순서 보장이 필요하다.
+ *
+ * Class Name : RoomSessionRegistry.java
+ * Description : 방 단위 연결과 프레임 방송을 in-memory로 관리한다. 다중 인스턴스는 pub/sub와
+ *               분산 순서 보장이 필요하다.
  */
 @Component
 public class RoomSessionRegistry {
