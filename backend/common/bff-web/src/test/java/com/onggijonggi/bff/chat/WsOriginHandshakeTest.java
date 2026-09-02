@@ -77,13 +77,10 @@ class WsOriginHandshakeTest {
 
 					@Override
 					public Mono<Void> handle(WebSocketSession session) {
-						Mono<Void> send = session.send(Mono.just(session.textMessage(
-								"{\"type\":\"chat.message\",\"content\":\"origin check\"}")));
-						Mono<Void> receive = session.receive()
-								.take(1)
-								.doOnNext(message -> received.set(message.getPayloadAsText()))
-								.then();
-						return Mono.when(send, receive);
+						return WsTestExchange.exchange(session,
+								active -> Mono.just(active.textMessage(
+										"{\"type\":\"chat.message\",\"content\":\"origin check\"}")),
+								1, message -> received.set(message.getPayloadAsText()));
 					}
 				})
 				.block(Duration.ofSeconds(5));

@@ -102,12 +102,10 @@ class CollabWebSocketHandlerTest {
 
 		new ReactorNettyWebSocketClient()
 				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
-					Mono<Void> send = session.send(Flux.just(
-							session.binaryMessage(factory -> factory.wrap(new byte[] {1, 2, 3})),
-							session.textMessage("{\"type\":\"chat.message\",\"content\":\"after binary\"}")));
-					Mono<Void> receive = session.receive().take(2)
-							.doOnNext(message -> received.add(message.getPayloadAsText())).then();
-					return Mono.when(send, receive);
+					return WsTestExchange.exchange(session, active -> Flux.just(
+							active.binaryMessage(factory -> factory.wrap(new byte[] {1, 2, 3})),
+							active.textMessage("{\"type\":\"chat.message\",\"content\":\"after binary\"}")),
+							2, message -> received.add(message.getPayloadAsText()));
 				}))
 				.block(Duration.ofSeconds(5));
 
@@ -233,10 +231,9 @@ class CollabWebSocketHandlerTest {
 
 		new ReactorNettyWebSocketClient()
 				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
-					Mono<Void> send = session.send(Flux.fromIterable(outbound).map(session::textMessage));
-					Mono<Void> receive = session.receive().take(expectedFrames)
-							.doOnNext(message -> received.add(message.getPayloadAsText())).then();
-					return Mono.when(send, receive);
+					return WsTestExchange.exchange(session,
+							active -> Flux.fromIterable(outbound).map(active::textMessage), expectedFrames,
+							message -> received.add(message.getPayloadAsText()));
 				}))
 				.block(Duration.ofSeconds(5));
 
@@ -249,13 +246,13 @@ class CollabWebSocketHandlerTest {
 		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
 		return new ReactorNettyWebSocketClient()
 				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
-					ready.countDown();
-					Mono<Void> send = session.send(outbound.asFlux().map(session::textMessage));
-					Mono<Void> receive = session.receive().take(1).doOnNext(message -> {
-						frames.add(message.getPayloadAsText());
-						received.countDown();
-					}).then().doFinally(ignored -> outbound.tryEmitComplete());
-					return Mono.when(send, receive).then(session.close(CloseStatus.NORMAL));
+					return WsTestExchange.exchange(session, active -> outbound.asFlux().map(active::textMessage), 1,
+							message -> {
+								frames.add(message.getPayloadAsText());
+								received.countDown();
+							}, ready::countDown)
+							.doFinally(ignored -> outbound.tryEmitComplete())
+							.then(session.close(CloseStatus.NORMAL));
 				}))
 				.doOnError(error -> failure.compareAndSet(null, error))
 				.doFinally(ignored -> completed.countDown())
