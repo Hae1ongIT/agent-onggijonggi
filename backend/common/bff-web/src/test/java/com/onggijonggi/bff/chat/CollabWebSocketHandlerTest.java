@@ -3,8 +3,11 @@ package com.onggijonggi.bff.chat;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
 import java.net.URI;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -14,53 +17,149 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.web.reactive.socket.CloseStatus;
 import org.springframework.web.reactive.socket.WebSocketHandler;
+import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/**
- * Class Name : CollabWebSocketHandlerTest.java
- * Description : 이슈 #3 — /api/ws의 실제 프로덕션 배선(WsSecurityConfig + CollabWebSocketHandler)을
- *               서브프로토콜 인증 기준으로 검증한다. 이슈 #7 스파이크가 확인했던 "인증 컨텍스트가
- *               메시지 루프까지 전파된다"는 사실을, Authorization 헤더가 아니라 Sec-WebSocket-Protocol
- *               조건에서 다시 확인한다.
- */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
 @Import({ChatControllerTest.FakeChatModelConfig.class, FakeJwtDecoderConfig.class})
 class CollabWebSocketHandlerTest {
 
-	/** app.cors.allowed-origins에 들어 있는 값 — Origin 검사(이슈 #5)를 통과시키기 위한 것이고,
-	 * 이 테스트의 관심사는 어디까지나 서브프로토콜 인증이다. */
 	private static final String ALLOWED_ORIGIN = "http://localhost:3000";
+
+	private final ObjectMapper objectMapper = new JsonMapper();
 
 	@LocalServerPort
 	private int port;
 
 	@Test
-	void acceptsHandshakeAndEchoesAuthenticatedSubjectWhenTokenOfferedViaSubProtocol() {
-		String subject = "collab-ws-user";
-		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
+	void broadcastsAValidatedFrameBackToTheAuthenticatedSender() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		String received = exchange("collab-ws-user", threadId,
+				List.of("""
+						{"type":"chat.message","content":"hello","sessionId":"ignored","from":"ignored"}
+						"""), 1).get(0);
 
+		WsFrame frame = objectMapper.readValue(received, WsFrame.class);
+
+		assertThat(frame).isInstanceOfSatisfying(ChatMessageFrame.class, message -> {
+			assertThat(message.sessionId()).isEqualTo(threadId);
+			assertThat(message.from()).isNotNull();
+			assertThat(message.content()).isEqualTo("hello");
+		});
+		assertThat(received).doesNotContain("connected:", "presence.join");
+	}
+
+	@Test
+	void keepsConnectionAfterMalformedFrameAndUsesDistinctTraceIds() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		List<String> received = exchange("malformed-user", threadId,
+				List.of("not-json", "{\"type\":\"chat.message\",\"content\":\"   \"}",
+						"{\"type\":\"unknown\",\"content\":\"ignored\"}",
+						"{\"type\":\"chat.message\",\"content\":\"valid\"}"), 4);
+
+		ErrorFrame first = (ErrorFrame) objectMapper.readValue(received.get(0), WsFrame.class);
+		ErrorFrame second = (ErrorFrame) objectMapper.readValue(received.get(1), WsFrame.class);
+		ErrorFrame third = (ErrorFrame) objectMapper.readValue(received.get(2), WsFrame.class);
+		ChatMessageFrame valid = (ChatMessageFrame) objectMapper.readValue(received.get(3), WsFrame.class);
+
+		assertThat(first.code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(second.code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(third.code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(List.of(first.traceId(), second.traceId(), third.traceId())).doesNotHaveDuplicates();
+		assertThat(first.traceId()).isNotBlank();
+		assertThat(valid.content()).isEqualTo("valid");
+	}
+
+	@Test
+	void ignoresKnownServerOnlyFrameTypes() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		List<String> received = exchange("server-frame-user", threadId,
+				List.of("{\"type\":\"presence.join\",\"sessionId\":\"" + threadId + "\"}",
+						"{\"type\":\"chat.message\",\"content\":\"accepted\"}"), 1);
+
+		ChatMessageFrame frame = (ChatMessageFrame) objectMapper.readValue(received.get(0), WsFrame.class);
+		assertThat(frame.content()).isEqualTo("accepted");
+	}
+
+	@Test
+	void rejectsBinaryFramesWithoutClosingTheConnection() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		String token = TestJwtSupport.signedJwt("binary-user", List.of("USER"));
+		List<String> received = new CopyOnWriteArrayList<>();
+
+		new ReactorNettyWebSocketClient()
+				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
+					return WsTestExchange.exchange(session, active -> Flux.just(
+							active.binaryMessage(factory -> factory.wrap(new byte[] {1, 2, 3})),
+							active.textMessage("{\"type\":\"chat.message\",\"content\":\"after binary\"}")),
+							2, message -> received.add(message.getPayloadAsText()));
+				}))
+				.block(Duration.ofSeconds(5));
+
+		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received.get(0), WsFrame.class);
+		ChatMessageFrame valid = (ChatMessageFrame) objectMapper.readValue(received.get(1), WsFrame.class);
+		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(valid.content()).isEqualTo("after binary");
+	}
+
+	@Test
+	void broadcastsOneMessageToTwoRealClientsInTheSameRoom() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		Sinks.Many<String> firstOutbound = Sinks.many().unicast().onBackpressureBuffer();
+		Sinks.Many<String> secondOutbound = Sinks.many().unicast().onBackpressureBuffer();
+		List<String> firstReceived = new CopyOnWriteArrayList<>();
+		List<String> secondReceived = new CopyOnWriteArrayList<>();
+		CountDownLatch ready = new CountDownLatch(2);
+		CountDownLatch received = new CountDownLatch(2);
+		CountDownLatch completed = new CountDownLatch(2);
+		AtomicReference<Throwable> failure = new AtomicReference<>();
+
+		Disposable first = openClient("room-user-1", threadId, firstOutbound,
+				firstReceived, ready, received, completed, failure);
+		Disposable second = openClient("room-user-2", threadId, secondOutbound,
+				secondReceived, ready, received, completed, failure);
+
+		try {
+			assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+			firstOutbound.tryEmitNext("{\"type\":\"chat.message\",\"content\":\"for everyone\"}");
+			assertThat(received.await(5, TimeUnit.SECONDS)).isTrue();
+			assertThat(completed.await(5, TimeUnit.SECONDS)).isTrue();
+			assertThat(failure.get()).isNull();
+
+			ChatMessageFrame firstFrame = (ChatMessageFrame) objectMapper.readValue(firstReceived.get(0), WsFrame.class);
+			ChatMessageFrame secondFrame = (ChatMessageFrame) objectMapper.readValue(secondReceived.get(0), WsFrame.class);
+			assertThat(firstFrame).isEqualTo(secondFrame);
+			assertThat(firstFrame.sessionId()).isEqualTo(threadId);
+		} finally {
+			firstOutbound.tryEmitComplete();
+			secondOutbound.tryEmitComplete();
+			first.dispose();
+			second.dispose();
+		}
+	}
+
+	@Test
+	void sendsMalformedRequestAndClosesNormallyForInvalidThreadId() throws Exception {
+		String token = TestJwtSupport.signedJwt("invalid-thread-user", List.of("USER"));
+		HttpHeaders headers = allowedHeaders();
 		AtomicReference<String> received = new AtomicReference<>();
-		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient();
+		AtomicReference<CloseStatus> closeStatus = new AtomicReference<>();
 
-		// 이슈 #5 이후 WsOriginWebFilter가 Origin을 검사한다. 넘기지 않으면 Netty가 ws://localhost:<랜덤포트>
-		// 기준으로 Origin을 스스로 만들어 붙이고, 그 값은 화이트리스트에 없어 403으로 끊긴다.
-		HttpHeaders headers = new HttpHeaders();
-		headers.setOrigin(ALLOWED_ORIGIN);
-
-		// ReactorNettyWebSocketClient는 Sec-WebSocket-Protocol 요청 헤더를 handler.getSubProtocols()로
-		// 직접 구성한다 — HttpHeaders로 수동으로 실은 값은 무시되고 덮어써진다(디버그 로그로 실측 확인).
-		// 그래서 실제 브라우저가 new WebSocket(url, ["access_token", token])으로 보내는 것과 동등하게,
-		// 여기서도 두 값을 getSubProtocols()에 순서대로 담아야 한다.
-		client.execute(URI.create("ws://localhost:" + port + "/api/ws"), headers, new WebSocketHandler() {
-
+		new ReactorNettyWebSocketClient()
+				.execute(URI.create("ws://localhost:" + port + "/api/ws/not-a-uuid"), headers, new WebSocketHandler() {
 					@Override
 					public List<String> getSubProtocols() {
 						return List.of("access_token", token);
@@ -69,104 +168,120 @@ class CollabWebSocketHandlerTest {
 					@Override
 					public Mono<Void> handle(WebSocketSession session) {
 						return session.receive()
-								.take(1)
 								.doOnNext(message -> received.set(message.getPayloadAsText()))
+								.then(session.closeStatus().doOnNext(closeStatus::set))
 								.then();
 					}
 				})
 				.block(Duration.ofSeconds(5));
 
-		assertThat(received.get()).isEqualTo("connected:" + subject);
+		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received.get(), WsFrame.class);
+		assertThat(error.sessionId()).isNull();
+		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(closeStatus.get().getCode()).isEqualTo(1000);
 	}
 
-	/** 이슈 #62 — 연결 유지 중 토큰이 만료되면 서버가 연결을 끊지 않고 그대로 두는 게 아니라, 커스텀 close
-	 *  code(4000)로 강제 종료해 클라이언트(#4)가 일반 네트워크 끊김(1006)과 구분해 재조회·재연결하게 한다. */
 	@Test
-	void closesConnectionWithCode4000WhenTokenExpiresWhileConnected() {
-		String subject = "token-expiry-user";
-		String token = TestJwtSupport.signedJwtExpiringAt(subject, List.of("USER"), Instant.now().plusSeconds(2));
-
+	void closesConnectionWithCode1000WhenClientClosesNormally() {
+		UUID threadId = UUID.randomUUID();
+		String token = TestJwtSupport.signedJwt("normal-close-user", List.of("USER"));
 		AtomicReference<CloseStatus> closeStatus = new AtomicReference<>();
-		// 다른 테스트가 반환한 풀링 커넥션을 재사용하면 서버가 닫는 중인 커넥션을 물려받아 핸드셰이크가
-		// 꼬일 수 있다 — 이 테스트만 풀 없이 매번 새 커넥션을 맺는다.
-		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient(HttpClient.create(ConnectionProvider.newConnection()));
+		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient(
+				HttpClient.create(ConnectionProvider.newConnection()));
 
-		// 빈 HttpHeaders를 넘기면 Netty가 Origin을 스스로 만들어 붙여 403으로 끊긴다(위 테스트 주석 참고).
-		HttpHeaders headers = new HttpHeaders();
-		headers.setOrigin(ALLOWED_ORIGIN);
+		client.execute(wsUri(threadId), allowedHeaders(), new WebSocketHandler() {
+			@Override
+			public List<String> getSubProtocols() {
+				return List.of("access_token", token);
+			}
 
-		client.execute(URI.create("ws://localhost:" + port + "/api/ws"), headers, new WebSocketHandler() {
-
-					@Override
-					public List<String> getSubProtocols() {
-						return List.of("access_token", token);
-					}
-
-					@Override
-					public Mono<Void> handle(WebSocketSession session) {
-						// receive()도 함께 구독해야 인바운드 프레임에 수요(demand)가 걸린다 — closeStatus()만
-						// 구독하면 서버가 보낸 프레임이 전혀 소비되지 않아 close 프레임도 도달하지 않는다.
-						Mono<Void> drainInbound = session.receive().then();
-						Mono<Void> captureCloseStatus = session.closeStatus().doOnNext(closeStatus::set).then();
-						return Mono.when(drainInbound, captureCloseStatus);
-					}
-				})
-				.block(Duration.ofSeconds(5));
-
-		assertThat(closeStatus.get().getCode()).isEqualTo(4000);
-	}
-
-	/** 이슈 #62 — 토큰 만료 타이머를 걸어도, 클라이언트가 먼저 정상 종료하면 그 종료(1000)가 그대로
-	 *  전달돼야 한다. 타이머 쪽 Mono가 경합에서 져도 뒤늦게 4000으로 덮어쓰지 않는지 확인한다. */
-	@Test
-	void closesConnectionWithCode1000WhenClientClosesNormallyBeforeTokenExpires() {
-		String subject = "normal-close-user";
-		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
-
-		AtomicReference<CloseStatus> closeStatus = new AtomicReference<>();
-		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient(HttpClient.create(ConnectionProvider.newConnection()));
-
-		// 빈 HttpHeaders를 넘기면 Netty가 Origin을 스스로 만들어 붙여 403으로 끊긴다(위 테스트 주석 참고).
-		HttpHeaders headers = new HttpHeaders();
-		headers.setOrigin(ALLOWED_ORIGIN);
-
-		client.execute(URI.create("ws://localhost:" + port + "/api/ws"), headers, new WebSocketHandler() {
-
-					@Override
-					public List<String> getSubProtocols() {
-						return List.of("access_token", token);
-					}
-
-					@Override
-					public Mono<Void> handle(WebSocketSession session) {
-						// receive()를 take(1)로 취소하면서 닫으면 클라이언트 쪽 취소가 종료 핸드셰이크보다
-						// 먼저 커넥션을 끊어버려 1006으로 관측된다 — 취소 없이 끝까지 구독해야 한다.
-						Mono<Void> drainInbound = session.receive().then();
-						Mono<Void> initiateClose = session.close();
-						Mono<Void> captureCloseStatus = session.closeStatus().doOnNext(closeStatus::set).then();
-						return Mono.when(drainInbound, initiateClose, captureCloseStatus);
-					}
-				})
-				.block(Duration.ofSeconds(5));
+			@Override
+			public Mono<Void> handle(WebSocketSession session) {
+				return Mono.when(session.receive().then(),
+						session.close(), session.closeStatus().doOnNext(closeStatus::set).then());
+			}
+		}).block(Duration.ofSeconds(5));
 
 		assertThat(closeStatus.get().getCode()).isEqualTo(1000);
 	}
 
-	/** 서브프로토콜을 아예 안 보내면 인증 컨버터가 빈 Mono를 반환하고, authorizeExchange가 미인증으로 거부한다(핸드셰이크 단계 401). */
 	@Test
-	void rejectsHandshakeWhenNoSubProtocolOffered() {
+	void rejectsHandshakeWithoutSubProtocolAndRejectsTheOldPath() {
 		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient();
 
-		HttpHeaders headers = new HttpHeaders();
-		headers.setOrigin(ALLOWED_ORIGIN);
-
-		// RuntimeException 하나만 확인하면 포트 오류 등 무관한 실패도 통과해버린다 — 실제로 401
-		// 응답 때문에 핸드셰이크가 거부됐는지까지 확인한다.
-		assertThatThrownBy(() -> client
-				.execute(URI.create("ws://localhost:" + port + "/api/ws"), headers, session -> Mono.empty())
+		assertThatThrownBy(() -> client.execute(wsUri(UUID.randomUUID()), allowedHeaders(), session -> Mono.empty())
 				.block(Duration.ofSeconds(5)))
 				.isInstanceOf(WebSocketClientHandshakeException.class)
 				.hasMessageContaining("401");
+
+		String token = TestJwtSupport.signedJwt("old-path-user", List.of("USER"));
+		assertThatThrownBy(() -> client.execute(URI.create("ws://localhost:" + port + "/api/ws"),
+				allowedHeaders(), protocolHandler(token, session -> Mono.empty())).block(Duration.ofSeconds(5)))
+				.isInstanceOf(WebSocketClientHandshakeException.class);
+
+		assertThatThrownBy(() -> client.execute(
+				URI.create("ws://localhost:" + port + "/api/ws/" + UUID.randomUUID() + "/extra"),
+				allowedHeaders(), protocolHandler(token, session -> Mono.empty())).block(Duration.ofSeconds(5)))
+				.isInstanceOf(WebSocketClientHandshakeException.class);
+	}
+
+	private List<String> exchange(String subject, UUID threadId, List<String> outbound, int expectedFrames) {
+		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
+		List<String> received = new CopyOnWriteArrayList<>();
+
+		new ReactorNettyWebSocketClient()
+				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
+					return WsTestExchange.exchange(session,
+							active -> Flux.fromIterable(outbound).map(active::textMessage), expectedFrames,
+							message -> received.add(message.getPayloadAsText()));
+				}))
+				.block(Duration.ofSeconds(5));
+
+		return received;
+	}
+
+	private Disposable openClient(String subject, UUID threadId, Sinks.Many<String> outbound,
+			List<String> frames, CountDownLatch ready, CountDownLatch received,
+			CountDownLatch completed, AtomicReference<Throwable> failure) {
+		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
+		return new ReactorNettyWebSocketClient()
+				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
+					return WsTestExchange.exchange(session, active -> outbound.asFlux().map(active::textMessage), 1,
+							message -> {
+								frames.add(message.getPayloadAsText());
+								received.countDown();
+							}, ready::countDown)
+							.doFinally(ignored -> outbound.tryEmitComplete())
+							.then(session.close(CloseStatus.NORMAL));
+				}))
+				.doOnError(error -> failure.compareAndSet(null, error))
+				.doFinally(ignored -> completed.countDown())
+				.subscribe();
+	}
+
+	private WebSocketHandler protocolHandler(String token,
+			java.util.function.Function<WebSocketSession, Mono<Void>> body) {
+		return new WebSocketHandler() {
+			@Override
+			public List<String> getSubProtocols() {
+				return List.of("access_token", token);
+			}
+
+			@Override
+			public Mono<Void> handle(WebSocketSession session) {
+				return body.apply(session);
+			}
+		};
+	}
+
+	private URI wsUri(UUID threadId) {
+		return URI.create("ws://localhost:" + port + "/api/ws/" + threadId);
+	}
+
+	private static HttpHeaders allowedHeaders() {
+		HttpHeaders headers = new HttpHeaders();
+		headers.setOrigin(ALLOWED_ORIGIN);
+		return headers;
 	}
 
 }

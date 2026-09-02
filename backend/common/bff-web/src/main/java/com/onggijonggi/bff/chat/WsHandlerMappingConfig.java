@@ -17,7 +17,8 @@ public class WsHandlerMappingConfig {
 
 	@Bean
 	public HandlerMapping collabWebSocketMapping(CollabWebSocketHandler collabWebSocketHandler) {
-		return new SimpleUrlHandlerMapping(Map.of("/api/ws", collabWebSocketHandler), Ordered.HIGHEST_PRECEDENCE);
+		return new SimpleUrlHandlerMapping(Map.of("/api/ws/{threadId}", collabWebSocketHandler),
+				Ordered.HIGHEST_PRECEDENCE);
 	}
 
 }

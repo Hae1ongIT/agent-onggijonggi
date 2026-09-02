@@ -24,17 +24,18 @@ class WsTestExchangeTest {
 		WebSocketSession session = mock(WebSocketSession.class);
 		WebSocketMessage inbound = mock(WebSocketMessage.class);
 		AtomicBoolean receiveRequested = new AtomicBoolean();
+		AtomicBoolean receiveRequestedCallbackRan = new AtomicBoolean();
 		AtomicBoolean sendStartedAfterReceiveDemand = new AtomicBoolean();
 
 		when(session.receive()).thenReturn(Flux.defer(() -> Flux.just(inbound)
 				.doOnRequest(ignored -> receiveRequested.set(true))));
 		when(session.send(ArgumentMatchers.<Publisher<WebSocketMessage>>any())).thenAnswer(ignored -> {
-			sendStartedAfterReceiveDemand.set(receiveRequested.get());
+			sendStartedAfterReceiveDemand.set(receiveRequested.get() && receiveRequestedCallbackRan.get());
 			return Mono.empty();
 		});
 
 		WsTestExchange.exchange(session, ignored -> Mono.empty(), 1, ignored -> {
-		}).block();
+		}, () -> receiveRequestedCallbackRan.set(true)).block();
 
 		assertThat(sendStartedAfterReceiveDemand).isTrue();
 	}

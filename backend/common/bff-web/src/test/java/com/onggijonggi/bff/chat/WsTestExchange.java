@@ -20,9 +20,19 @@ final class WsTestExchange {
 	static Mono<Void> exchange(WebSocketSession session,
 			Function<WebSocketSession, Publisher<WebSocketMessage>> outbound, long expectedFrames,
 			Consumer<WebSocketMessage> onInbound) {
+		return exchange(session, outbound, expectedFrames, onInbound, () -> {
+		});
+	}
+
+	static Mono<Void> exchange(WebSocketSession session,
+			Function<WebSocketSession, Publisher<WebSocketMessage>> outbound, long expectedFrames,
+			Consumer<WebSocketMessage> onInbound, Runnable onReceiveRequested) {
 		Sinks.One<Void> receiveRequested = Sinks.one();
 		Mono<Void> receive = session.receive()
-				.doOnRequest(ignored -> receiveRequested.tryEmitEmpty())
+				.doOnRequest(ignored -> {
+					receiveRequested.tryEmitEmpty();
+					onReceiveRequested.run();
+				})
 				.take(expectedFrames)
 				.doOnNext(onInbound)
 				.then();

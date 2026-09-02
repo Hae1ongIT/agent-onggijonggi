@@ -45,7 +45,7 @@ class WsOriginHandshakeTest {
 		HttpHeaders headers = new HttpHeaders();
 		headers.setOrigin(ALLOWED_ORIGIN);
 
-		assertThat(connect(headers)).isEqualTo("connected:origin-allowed-user");
+		assertThat(connect(headers)).contains("\"type\":\"chat.message\"", "\"content\":\"origin check\"");
 	}
 
 	/** 화이트리스트 밖 Origin은 업그레이드 단계에서 403으로 끊는다. 토큰이 유효해도 마찬가지다 —
@@ -67,7 +67,8 @@ class WsOriginHandshakeTest {
 		AtomicReference<String> received = new AtomicReference<>();
 
 		new ReactorNettyWebSocketClient()
-				.execute(URI.create("ws://localhost:" + port + "/api/ws"), headers, new WebSocketHandler() {
+				.execute(URI.create("ws://localhost:" + port + "/api/ws/" + java.util.UUID.randomUUID()),
+						headers, new WebSocketHandler() {
 
 					@Override
 					public List<String> getSubProtocols() {
@@ -76,10 +77,10 @@ class WsOriginHandshakeTest {
 
 					@Override
 					public Mono<Void> handle(WebSocketSession session) {
-						return session.receive()
-								.take(1)
-								.doOnNext(message -> received.set(message.getPayloadAsText()))
-								.then();
+						return WsTestExchange.exchange(session,
+								active -> Mono.just(active.textMessage(
+										"{\"type\":\"chat.message\",\"content\":\"origin check\"}")),
+								1, message -> received.set(message.getPayloadAsText()));
 					}
 				})
 				.block(Duration.ofSeconds(5));
