@@ -14,15 +14,19 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `at` | `at` | 시점 | 알고리즘 | - |
 | `att` | `attempt` | 시도 | 알고리즘 | - |
 | `adt` | `audit` | 감사 | 알고리즘 | - |
+| `ath` | `author` | 작성자 | 알고리즘 | - |
 | `by` | `by` | 주체 | 알고리즘 | - |
+| `cnc` | `cancelled` | 취소됨 | 알고리즘 | - |
 | `chat` | `chat` | 대화 | 알고리즘 | - |
 | `chunk` | `chunk` | 조각 | 예외 | 알고리즘 `chn`은 의미가 불명확 |
 | `chnk` | `chunking` | 조각화 | 예외 | `chunk`와 구분(알고리즘은 둘 다 `chn`) |
+| `completed` | `completed` | 완료됨 | 예외 | 알고리즘 결과 `cmp`는 compare·component와 혼동. `completed_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`/`inactive`/`ended`와 동일 패턴 |
 | `content` | `content` | 본문 | 예외 | 알고리즘 `cnt`는 count로 통용돼 혼동 |
 | `cnt` | `count` | 개수 | 알고리즘 | - |
 | `created` | `created` | 생성됨 | 예외 | 관용 — `created_at`은 범용 관례라 원형 유지 |
 | `cur` | `current` | - | 예외 | 관용어 — 알고리즘 결과 `crr`이 부자연스러움 |
 | `deleted` | `deleted` | - | 예외 | 관용 유지 — `deleted_at`/`deleted_by` 대칭, 기존 `created`/`updated`/`indexed`/`uploaded`와 동일 패턴 |
+| `dnd` | `denied` | 거부됨 | 알고리즘 | - |
 | `dept` | `department` | - | 예외 | 관용어 — 알고리즘 결과 `dpr`이 불명확 |
 | `dim` | `dim` | 차원 | 알고리즘 | - |
 | `drc` | `direct` | 1:1 | 알고리즘 | - |
@@ -55,9 +59,11 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `own` | `owner` | 소유자 | 알고리즘 | - |
 | `pw` | `password` | - | 예외 | 관용어(팀 합의) |
 | `path` | `path` | 경로 | 알고리즘 | - |
+| `pyl` | `payload` | 적재 데이터 | 알고리즘 | - |
 | `pnd` | `pending` | 대기 중 | 알고리즘 | - |
 | `qst` | `question` | 질문 | 알고리즘 | - |
 | `rsn` | `reason` | 사유 | 알고리즘 | - |
+| `rpl` | `reply` | 답글 | 알고리즘 | - |
 | `req` | `requester` | 요청자 | 예외 | 관용어 — 알고리즘은 `rqs` |
 | `role` | `role` | 역할 | 알고리즘 | - |
 | `run` | `run` | 실행 | 알고리즘 | - |

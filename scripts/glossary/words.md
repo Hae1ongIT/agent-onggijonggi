@@ -25,6 +25,7 @@
 | `access` | 접근 |
 | `answer` | 답변 |
 | `app` | 애플리케이션 |
+| `author` | 작성자 |
 | `archived` | 보관됨 |
 | `at` | 시점 |
 | `attempt` | 시도 |
@@ -35,7 +36,10 @@
 | `chunking` | 조각화 |
 | `content` | 본문 |
 | `count` | 개수 |
+| `cancelled` | 취소됨 |
+| `completed` | 완료됨 |
 | `created` | 생성됨 |
+| `denied` | 거부됨 |
 | `dim` | 차원 |
 | `direct` | 1:1 |
 | `document` | 문서 |
@@ -63,9 +67,11 @@
 | `outcome` | 결과 |
 | `owner` | 소유자 |
 | `path` | 경로 |
+| `payload` | 적재 데이터 |
 | `pending` | 대기 중 |
 | `question` | 질문 |
 | `reason` | 사유 |
+| `reply` | 답글 |
 | `requester` | 요청자 |
 | `role` | 역할 |
 | `run` | 실행 |
@@ -118,6 +124,7 @@
 | `archived` | `archived` | 관용 유지 — `archived_at` 대칭, 기존 `created`/`updated`/`deleted`와 동일 패턴 |
 | `inactive` | `inactive` | 관용 유지 — 알고리즘 결과 `inc`는 increment·include와 혼동. `inactive_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
 | `ended` | `ended` | 알고리즘 결과가 `end`(원형)와 충돌. `ended_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`와 동일 패턴 |
+| `completed` | `completed` | 알고리즘 결과 `cmp`는 compare·component와 혼동. `completed_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`/`inactive`/`ended`와 동일 패턴 |
 
 ### 복수형 정책
 
