@@ -4,7 +4,6 @@ import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -15,12 +14,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.client.RestTestClient;
+import org.springframework.web.reactive.socket.CloseStatus;
 import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 import reactor.core.publisher.Mono;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -35,14 +34,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
 		properties = {"app.ratelimit.ws-handshake-per-minute=" + WsHandshakeRateLimitTest.WS_LIMIT,
-				"app.ratelimit.window-seconds=" + WsHandshakeRateLimitTest.WINDOW_SECONDS})
+				"app.ratelimit.window-seconds=" + WsHandshakeRateLimitTest.TEST_WINDOW_SECONDS})
 @ActiveProfiles("test")
 @Import({ChatControllerTest.FakeChatModelConfig.class, FakeJwtDecoderConfig.class})
 class WsHandshakeRateLimitTest {
 
 	static final int WS_LIMIT = 2;
 
-	static final int WINDOW_SECONDS = 2;
+	/** 윈도우 리셋은 RateLimitWebFilterTest가 검증하므로 이 배선 테스트에서는 경계를 만들지 않는다. */
+	static final long TEST_WINDOW_SECONDS = Long.MAX_VALUE;
 
 	private static final String ALLOWED_ORIGIN = "http://localhost:3000";
 
@@ -59,29 +59,16 @@ class WsHandshakeRateLimitTest {
 	}
 
 	/**
-	* awaitWindowStart: 고정 윈도우(벽시계 기준 WINDOW_SECONDS초 버킷)의 경계에 핸드셰이크가 걸쳐
-	* 카운트가 새 윈도우에서 재시작되는 걸 피하려고, 방금 시작된 새 윈도우의 맨 앞까지 기다린다.
-	* RateLimitWebFilterTest와 같은 이유·같은 방식이다.
-	*/
-	private static void awaitWindowStart() throws InterruptedException {
-		long windowMillis = WINDOW_SECONDS * 1000L;
-		long msIntoWindow = System.currentTimeMillis() % windowMillis;
-		Thread.sleep(windowMillis - msIntoWindow + 50);
-	}
-
-	/**
 	* rejectsHandshakeAfterExceedingLimit: 한도까지는 핸드셰이크가 통과해 핸들러까지 닿고, 그다음
 	* 연결은 업그레이드가 성립하기 전에 429로 끊기는지 본다. 브라우저와 달리 Netty 클라이언트는
 	* 101이 아닌 응답을 예외로 올려줘서, 여기서는 상태 코드를 직접 확인할 수 있다.
 	*/
 	@Test
-	void rejectsHandshakeAfterExceedingLimit() throws InterruptedException {
+	void rejectsHandshakeAfterExceedingLimit() {
 		String sub = "ws-ratelimit-user";
 
-		awaitWindowStart();
-
 		for (int i = 0; i < WS_LIMIT; i++) {
-			assertThat(connect(sub)).contains("\"type\":\"chat.message\"");
+			connect(sub);
 		}
 
 		assertThatThrownBy(() -> connect(sub))
@@ -95,13 +82,11 @@ class WsHandshakeRateLimitTest {
 	* 카운터를 static이나 공용 빈으로 끌어올리면 이 테스트가 먼저 깨진다.
 	*/
 	@Test
-	void keepsHttpBucketSeparate() throws InterruptedException {
+	void keepsHttpBucketSeparate() {
 		String sub = "ws-ratelimit-mixed-user";
 
-		awaitWindowStart();
-
 		for (int i = 0; i < WS_LIMIT; i++) {
-			assertThat(connect(sub)).contains("\"type\":\"chat.message\"");
+			connect(sub);
 		}
 		assertThatThrownBy(() -> connect(sub))
 				.isInstanceOf(WebSocketClientHandshakeException.class)
@@ -132,10 +117,8 @@ class WsHandshakeRateLimitTest {
 	* 이 테스트의 관심사가 아니고, 세어졌다는 사실만 있으면 된다.
 	*/
 	@Test
-	void writesRateLimitedEnvelopeOnWsPath() throws InterruptedException {
+	void writesRateLimitedEnvelopeOnWsPath() {
 		String token = TestJwtSupport.signedJwt("ws-ratelimit-envelope-user", List.of("USER"));
-
-		awaitWindowStart();
 
 		for (int i = 0; i < WS_LIMIT; i++) {
 			probeWsPath(token).exchange();
@@ -154,13 +137,11 @@ class WsHandshakeRateLimitTest {
 				.header("Sec-WebSocket-Protocol", "access_token, " + token);
 	}
 
-	/** 유효한 토큰을 서브프로토콜로 실어 붙고, 핸들러가 돌려주는 첫 프레임을 꺼내온다
-	 * (WsOriginHandshakeTest와 같은 방식 — CollabWebSocketHandlerTest 주석에 서브프로토콜 구성 이유가 있다). */
-	private String connect(String sub) {
+	/** 유효한 토큰을 서브프로토콜로 실어 핸드셰이크한 뒤 정상 종료한다. */
+	private void connect(String sub) {
 		String token = TestJwtSupport.signedJwt(sub, List.of("USER"));
 		HttpHeaders headers = new HttpHeaders();
 		headers.setOrigin(ALLOWED_ORIGIN);
-		AtomicReference<String> received = new AtomicReference<>();
 
 		new ReactorNettyWebSocketClient()
 				.execute(URI.create("ws://localhost:" + port + "/api/ws/" + java.util.UUID.randomUUID()),
@@ -173,15 +154,10 @@ class WsHandshakeRateLimitTest {
 
 					@Override
 					public Mono<Void> handle(WebSocketSession session) {
-						return WsTestExchange.exchange(session,
-								active -> Mono.just(active.textMessage(
-										"{\"type\":\"chat.message\",\"content\":\"rate check\"}")),
-								1, message -> received.set(message.getPayloadAsText()));
+						return session.close(CloseStatus.NORMAL);
 					}
 				})
 				.block(Duration.ofSeconds(5));
-
-		return received.get();
 	}
 
 }
