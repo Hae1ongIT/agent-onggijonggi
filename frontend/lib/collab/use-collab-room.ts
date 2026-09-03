@@ -10,14 +10,13 @@
  프레임으로 줄지는 아직 #22에 미결이라 양쪽 다 대비해야 한다(프레임 쪽은 room-state.ts).
  *********************************************************/
 
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { collabWsPath } from '@/lib/api/config';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { type WsConnection, openWsConnection } from '@/lib/api/ws-connection';
-import type { WsFrame } from '@/lib/transport/frames';
 import { parseFrameFromText } from '@/lib/transport/parse-frame';
 import {
   type RoomState,
   applyFrame,
+  clearRoomError,
   initialRoomState,
   isForbidden,
 } from './room-state';
@@ -41,20 +40,26 @@ export interface CollabRoom {
   connection: RoomConnection;
   /** 메시지를 올려보낸다. 끊겨 있으면 보내지 않고 false — 화면이 그 자리에서 안내한다. */
   send: (content: string) => boolean;
+  /** 방을 막지 않는 최신 오류 알림을 닫는다. */
+  dismissError: () => void;
 }
 
 export function useCollabRoom(threadId: string): CollabRoom {
-  const [state, dispatch] = useReducer(applyFrame, initialRoomState);
+  const [state, setState] = useState<RoomState>(initialRoomState);
   const [connection, setConnection] = useState<RoomConnection>('connecting');
   const connectionRef = useRef<WsConnection | null>(null);
 
   useEffect(() => {
-    const ws = openWsConnection({
-      path: collabWsPath(threadId),
+    const ws = openWsConnection(threadId, {
       onMessage: (data) => {
         // 해석되지 않는 프레임은 parse-frame.ts가 null로 흘려보낸다 — 화면을 멈출 이유가 아니다.
         const frame = parseFrameFromText(data);
-        if (frame !== null) dispatch(frame);
+        if (frame !== null) {
+          if (frame.type === 'error') {
+            console.error(`[collab] WS error traceId=${frame.traceId}`);
+          }
+          setState((current) => applyFrame(current, frame));
+        }
       },
       onOpenChange: (open) => setConnection(open ? 'open' : 'reconnecting'),
     });
@@ -78,20 +83,18 @@ export function useCollabRoom(threadId: string): CollabRoom {
     return () => clearTimeout(timer);
   }, [connection]);
 
-  const send = useCallback(
-    (content: string) => {
-      // from은 서버가 커넥션에 붙은 사용자로 덮어쓰므로 클라이언트 값은 쓰이지 않는다.
-      // 그래도 빈 문자열을 채우는 것은 #8 스키마가 필수 필드로 두고 있어서다.
-      const frame: WsFrame = {
-        type: 'chat.message',
-        sessionId: threadId,
-        from: '',
-        content,
-      };
-      return connectionRef.current?.send(JSON.stringify(frame)) ?? false;
-    },
-    [threadId],
+  const send = useCallback((content: string) => {
+    const frame = {
+      type: 'chat.message',
+      content,
+    };
+    return connectionRef.current?.send(JSON.stringify(frame)) ?? false;
+  }, []);
+
+  const dismissError = useCallback(
+    () => setState((current) => clearRoomError(current)),
+    [],
   );
 
-  return { state, connection, send };
+  return { state, connection, send, dismissError };
 }

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import type { Citation } from '@/lib/api/chat';
 import type { WsFrame } from '@/lib/transport/frames';
 import {
   type RoomState,
   applyFrame,
+  clearRoomError,
   initialRoomState,
   isForbidden,
 } from './room-state';
@@ -17,19 +19,29 @@ function say(from: string, content: string): WsFrame {
   return { type: 'chat.message', sessionId: THREAD, from, content };
 }
 
-function answer(delta: string, status: 'streaming' | 'done'): WsFrame {
+function answer(
+  delta: string,
+  status: 'streaming' | 'done',
+  metadata: {
+    citations?: Citation[];
+    restrictedResultsOmitted?: boolean;
+  } = {},
+): WsFrame {
   return {
     type: 'chat.answer',
     sessionId: THREAD,
     delta,
-    citations: [],
-    restrictedResultsOmitted: false,
+    citations: metadata.citations ?? [],
+    restrictedResultsOmitted: metadata.restrictedResultsOmitted ?? false,
     status,
   };
 }
 
 /** 프레임을 순서대로 접는다 — 테스트가 화면 없이 대화 한 판을 재현하는 방법이다. */
-function fold(frames: WsFrame[], from: RoomState = initialRoomState): RoomState {
+function fold(
+  frames: WsFrame[],
+  from: RoomState = initialRoomState,
+): RoomState {
   return frames.reduce(applyFrame, from);
 }
 
@@ -55,6 +67,8 @@ describe('applyFrame - chat.message', () => {
         from: 'sujin',
         content: '이 계약서 확인 부탁해요',
         streaming: false,
+        citations: [],
+        restrictedResultsOmitted: false,
       },
     ]);
   });
@@ -111,6 +125,44 @@ describe('applyFrame - chat.answer', () => {
     const state = fold([say('sujin', '@AI 요약해줘'), answer('요약', 'done')]);
     expect(state.messages.map((m) => m.from)).toEqual(['sujin', null]);
   });
+
+  it('토큰보다 먼저 온 citations를 답변에 누적하고 docId 중복은 최신 값으로 바꾼다', () => {
+    const first = {
+      docId: 'd1',
+      title: '초안',
+      snippet: '첫 발췌',
+      score: 0.5,
+    };
+    const updated = {
+      docId: 'd1',
+      title: '최종',
+      snippet: '갱신 발췌',
+      score: 0.9,
+    };
+    const second = {
+      docId: 'd2',
+      title: '추가',
+      snippet: '둘째 발췌',
+      score: 0.7,
+    };
+
+    const state = fold([
+      answer('', 'streaming', { citations: [first] }),
+      answer('답변', 'streaming', {
+        citations: [updated, second],
+        restrictedResultsOmitted: true,
+      }),
+      answer('', 'done'),
+    ]);
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]).toMatchObject({
+      content: '답변',
+      streaming: false,
+      citations: [updated, second],
+      restrictedResultsOmitted: true,
+    });
+  });
 });
 
 describe('applyFrame - error', () => {
@@ -125,7 +177,8 @@ describe('applyFrame - error', () => {
       },
     ]);
     expect(isForbidden(state.error)).toBe(true);
-    expect(state.error?.message).toBe('이 방에 접근할 수 없습니다.');
+    expect(state.error?.message).toBe('이 작업을 수행할 권한이 없어요.');
+    expect(state.error?.traceId).toBe('trace-1');
   });
 
   it('그 밖의 오류는 접근 거부가 아니다', () => {
@@ -140,6 +193,43 @@ describe('applyFrame - error', () => {
     ]);
     expect(isForbidden(state.error)).toBe(false);
     expect(state.error?.code).toBe('RATE_LIMITED');
+  });
+
+  it('AI 종결 오류는 부분 답변을 보존하고 streaming만 끝낸다', () => {
+    const state = fold([
+      answer('부분 답변', 'streaming'),
+      {
+        type: 'error',
+        sessionId: THREAD,
+        code: 'MODEL_UNAVAILABLE',
+        message: '모델 오류',
+        traceId: 'trace-ai',
+      },
+    ]);
+
+    expect(state.messages[0]).toMatchObject({
+      content: '부분 답변',
+      streaming: false,
+    });
+  });
+
+  it('비종결 오류는 진행 중 AI 답변을 끝내지 않고 알림만 닫을 수 있다', () => {
+    const state = fold([
+      answer('진행 중', 'streaming'),
+      {
+        type: 'error',
+        sessionId: THREAD,
+        code: 'MESSAGE_DELIVERY_FAILED',
+        message: '전달 실패',
+        traceId: 'trace-local',
+      },
+    ]);
+
+    expect(state.messages[0].streaming).toBe(true);
+    expect(state.error?.message).toBe(
+      '메시지를 전달하지 못했어요. 연결을 확인하고 다시 보내 주세요.',
+    );
+    expect(clearRoomError(state).error).toBeNull();
   });
 });
 

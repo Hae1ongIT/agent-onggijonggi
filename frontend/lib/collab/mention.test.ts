@@ -18,4 +18,10 @@ describe('mentionsAi', () => {
     expect(mentionsAi('@AIssistant 에게 물어봐')).toBe(false);
     expect(mentionsAi('@AI야 이거 뭐야')).toBe(true);
   });
+
+  it('앞뒤 식별자 문자가 붙으면 멘션이 아니다', () => {
+    expect(mentionsAi('team@AI 알려줘')).toBe(false);
+    expect(mentionsAi('@AIX 알려줘')).toBe(false);
+    expect(mentionsAi('@AI_1 알려줘')).toBe(false);
+  });
 });

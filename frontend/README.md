@@ -21,20 +21,20 @@ Keycloak·BFF·PostgreSQL·LiteLLM을 함께 띄우는 절차는 루트 [INSTALL
 
 ## 목업 WS 서버
 
-협업채팅 WS(`03·CORE`)가 아직 없어도 프레임을 주고받아 볼 수 있는 목업이다. 화면을 띄우는 것과는
+실 BFF 없이도 #16·#17의 협업채팅 프레임을 주고받아 볼 수 있는 목업이다. 화면을 띄우는 것과는
 무관하다 — 위의 제약은 그대로다.
 
 ```
-bun run mock:ws        # ws://localhost:4001/api/ws
+bun run mock:ws        # ws://localhost:4001/api/ws/{threadId}
 ```
 
 WebSocket은 Next Route Handler로 흉내 낼 수 없어(`Request → Response` 모델이라 raw socket에 닿지
 못한다) 별도 프로세스로 뜬다. 그래서 HTTP 목업 라우트(`app/(chat)/api/chat/*`)와 토글이 따로다 —
 `.env.local`의 `NEXT_PUBLIC_MOCK_WS_URL`을 채우면 HTTP는 그대로 두고 WS만 이 서버로 간다.
 
-`?threadId=`로 방을, `?user=`로 사람을 정한다. 같은 방에 둘이 붙으면 서로의 발화가 보이고,
-`@AI`가 들어간 발화에만 답변 스트림이 흐른다. `threadId`를 `forbidden-close`·`forbidden-frame`으로
-주면 방 접근 거부를 두 방식으로 재현한다(어느 쪽이 될지는 이슈 #22에서 정해진다).
+방은 `/api/ws/{threadId}`의 UUID 경로로, 목업 사용자 이름은 선택적인 `?user=`로 정한다. 같은 방에
+둘이 붙으면 서로의 발화가 보이고 `@AI`가 들어간 발화에만 답변 스트림이 흐른다. 협업 채널 목록에는
+정상 스트리밍·AI 최초 오류·AI 도중 오류를 재현하는 UUID 방이 각각 제공된다.
 
 토큰은 검증하지 않는다. 서브프로토콜이 `access_token, <아무 값>` 모양이기만 하면 붙는다.
 

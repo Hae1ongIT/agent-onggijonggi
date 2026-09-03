@@ -7,16 +7,20 @@
  살아남을 규칙이라는 것이다 — 방 레지스트리(#16)와 `@AI` 분기(#17)가 서버에 들어와도 프레임을
  상태로 접는 방식 자체는 바뀌지 않는다.
 
- 두 가지를 일부러 다루지 않는다. `chat.answer`의 citations·restrictedResultsOmitted는 1:1
- 채팅의 근거 패널이 쓰는 값인데 협업방 화면에는 그 패널이 없어(#19 완료 기준 밖) 버린다.
- 참여자 퇴장도 없다 — `presence.leave` 프레임이 #8에 아직 없어서(#25 논의 중) 나갔다는 사실이
+ 참여자 퇴장은 다루지 않는다 — `presence.leave` 프레임이 #8에 아직 없어서(#25 논의 중) 나갔다는 사실이
  애초에 도착하지 않는다.
  *********************************************************/
 
+import type { Citation } from '@/lib/api/chat';
+import { friendlyMessageForCode } from '@/lib/api/errors';
 import type { WsFrame } from '@/lib/transport/frames';
 
 /** 방에 접근할 수 없다는 뜻의 에러 코드(백엔드 ErrorFrame이 02·EDGE에서 쓰는 값). */
 const FORBIDDEN_CODE = 'FORBIDDEN';
+const TERMINAL_AI_ERROR_CODES = new Set([
+  'MODEL_UNAVAILABLE',
+  'INTERNAL_ERROR',
+]);
 
 /** 메시지 하나. 사람과 AI를 role이 아니라 보낸 사람 유무로 가른다 — 협업방에는 보낸 사람이 여럿이다. */
 export interface CollabMessage {
@@ -26,12 +30,15 @@ export interface CollabMessage {
   content: string;
   /** AI 답변이 아직 흐르는 중인지. 사람 메시지는 언제나 false다. */
   streaming: boolean;
+  citations: Citation[];
+  restrictedResultsOmitted: boolean;
 }
 
 /** 서버가 보낸 오류. code가 FORBIDDEN이면 방을 그릴 수 없고, 그 외에는 방 위에 얹어 알린다. */
 export interface RoomError {
   code: string;
   message: string;
+  traceId: string;
 }
 
 export interface RoomState {
@@ -55,6 +62,10 @@ export function isForbidden(error: RoomError | null): boolean {
   return error?.code === FORBIDDEN_CODE;
 }
 
+export function clearRoomError(state: RoomState): RoomState {
+  return state.error === null ? state : { ...state, error: null };
+}
+
 /** 메시지 하나를 덧붙인다. */
 function appendMessage(
   state: RoomState,
@@ -66,10 +77,34 @@ function appendMessage(
     ...state,
     messages: [
       ...state.messages,
-      { id: `m${state.nextMessageId}`, from, content, streaming },
+      {
+        id: `m${state.nextMessageId}`,
+        from,
+        content,
+        streaming,
+        citations: [],
+        restrictedResultsOmitted: false,
+      },
     ],
     nextMessageId: state.nextMessageId + 1,
   };
+}
+
+function mergeCitations(current: Citation[], incoming: Citation[]): Citation[] {
+  const merged = [...current];
+  const indexes = new Map(
+    merged.map((citation, index) => [citation.docId, index]),
+  );
+  for (const citation of incoming) {
+    const index = indexes.get(citation.docId);
+    if (index === undefined) {
+      indexes.set(citation.docId, merged.length);
+      merged.push(citation);
+    } else {
+      merged[index] = citation;
+    }
+  }
+  return merged;
 }
 
 /**
@@ -95,6 +130,8 @@ function extendAnswer(
   index: number,
   delta: string,
   done: boolean,
+  citations: Citation[],
+  restrictedResultsOmitted: boolean,
 ): RoomState {
   const messages = [...state.messages];
   const target = messages[index];
@@ -102,6 +139,9 @@ function extendAnswer(
     ...target,
     content: target.content + delta,
     streaming: !done,
+    citations: mergeCitations(target.citations, citations),
+    restrictedResultsOmitted:
+      target.restrictedResultsOmitted || restrictedResultsOmitted,
   };
   return { ...state, messages };
 }
@@ -123,14 +163,50 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
     case 'chat.answer': {
       const done = frame.status === 'done';
       const index = streamingAnswerIndex(state);
-      if (index !== null) return extendAnswer(state, index, frame.delta, done);
+      if (index !== null) {
+        return extendAnswer(
+          state,
+          index,
+          frame.delta,
+          done,
+          frame.citations,
+          frame.restrictedResultsOmitted,
+        );
+      }
       // 아직 아무것도 안 실린 패킷으로 빈 말풍선을 만들 이유는 없다 — delta 없이 status만
       // 알리는 패킷도 유효한 계약이다(frames.ts 주석).
-      if (frame.delta === '') return state;
-      return appendMessage(state, null, frame.delta, !done);
+      if (
+        frame.delta === '' &&
+        frame.citations.length === 0 &&
+        !frame.restrictedResultsOmitted
+      ) {
+        return state;
+      }
+      const appended = appendMessage(state, null, frame.delta, !done);
+      return extendAnswer(
+        appended,
+        appended.messages.length - 1,
+        '',
+        done,
+        frame.citations,
+        frame.restrictedResultsOmitted,
+      );
     }
 
-    case 'error':
-      return { ...state, error: { code: frame.code, message: frame.message } };
+    case 'error': {
+      const index = streamingAnswerIndex(state);
+      const nextState =
+        index !== null && TERMINAL_AI_ERROR_CODES.has(frame.code)
+          ? extendAnswer(state, index, '', true, [], false)
+          : state;
+      return {
+        ...nextState,
+        error: {
+          code: frame.code,
+          message: friendlyMessageForCode(frame.code),
+          traceId: frame.traceId,
+        },
+      };
+    }
   }
 }
