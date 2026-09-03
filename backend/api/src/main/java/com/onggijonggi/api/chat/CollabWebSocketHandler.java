@@ -97,6 +97,9 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				.doOnSubscribe(subscription -> log.info(
 						"[diag-102] inboundResponses(session.receive) subscribed threadId={} connectionId={}",
 						threadId, connectionId))
+				.doOnRequest(n -> log.info(
+						"[diag-102] inboundResponses(session.receive) requested n={} threadId={} connectionId={}",
+						n, threadId, connectionId))
 				.concatMap(message -> handleInbound(message, threadId, userId))
 				.doFinally(ignored -> inboundDone.tryEmitEmpty());
 
@@ -131,6 +134,12 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 
 	private Mono<WsFrame> handleInbound(WebSocketMessage message, UUID threadId, UUID userId) {
 		String traceId = newTraceId();
+		// 이슈 #102 진단용 임시 로그(2026-09-03) — handleInbound 진입 자체를 기록한다. 이게 안
+		// 찍히면 session.receive()가 아예 아무것도 못 받은 것이고, 찍히는데 그 뒤가 없으면
+		// 파싱·분류 단계(서버 전용 타입 오분류 등)에서 조용히 버려진다는 뜻이다.
+		log.info("[diag-102] handleInbound entered threadId={} traceId={} messageType={} rawPayload={}",
+				threadId, traceId, message.getType(),
+				message.getType() == WebSocketMessage.Type.TEXT ? message.getPayloadAsText() : "<non-text>");
 		String payload = textPayload(message);
 		if (payload == null) {
 			return Mono.just(malformed(threadId, traceId));
@@ -143,7 +152,10 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 			log.debug("Malformed WebSocket frame threadId={} traceId={}", threadId, traceId, error);
 			return Mono.just(malformed(threadId, traceId));
 		}
+		log.info("[diag-102] handleInbound parsed type={} threadId={} traceId={}", inbound.type(), threadId, traceId);
 		if (SERVER_ONLY_TYPES.contains(inbound.type())) {
+			log.info("[diag-102] handleInbound ignored as server-only type={} threadId={} traceId={}",
+					inbound.type(), threadId, traceId);
 			return Mono.empty();
 		}
 		if (!"chat.message".equals(inbound.type()) || inbound.content() == null || inbound.content().isBlank()) {
