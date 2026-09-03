@@ -110,6 +110,9 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				.doOnSubscribe(subscription -> log.info(
 						"[diag-102] session.send subscribed(=merge subscription starts) threadId={} connectionId={}",
 						threadId, connectionId))
+				.doOnError(error -> log.error(
+						"[diag-102] session.send errored threadId={} connectionId={} errorClass={} message={}",
+						threadId, connectionId, error.getClass().getName(), error.getMessage(), error))
 				.doFinally(signal -> log.info(
 						"[diag-102] session.send finished threadId={} connectionId={} signal={}",
 						threadId, connectionId, signal))
