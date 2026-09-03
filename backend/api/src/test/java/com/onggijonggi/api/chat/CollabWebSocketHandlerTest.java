@@ -102,7 +102,7 @@ class CollabWebSocketHandlerTest {
 		String token = TestJwtSupport.signedJwt("binary-user", List.of("USER"));
 		List<String> received = new CopyOnWriteArrayList<>();
 
-		new ReactorNettyWebSocketClient()
+		freshClient()
 				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
 					return WsTestExchange.exchange(session, active -> Flux.just(
 							active.binaryMessage(factory -> factory.wrap(new byte[] {1, 2, 3})),
@@ -188,10 +188,8 @@ class CollabWebSocketHandlerTest {
 		UUID threadId = UUID.randomUUID();
 		String token = TestJwtSupport.signedJwt("normal-close-user", List.of("USER"));
 		AtomicReference<CloseStatus> closeStatus = new AtomicReference<>();
-		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient(
-				HttpClient.create(ConnectionProvider.newConnection()));
 
-		client.execute(wsUri(threadId), allowedHeaders(), new WebSocketHandler() {
+		freshClient().execute(wsUri(threadId), allowedHeaders(), new WebSocketHandler() {
 			@Override
 			public List<String> getSubProtocols() {
 				return List.of("access_token", token);
@@ -227,11 +225,22 @@ class CollabWebSocketHandlerTest {
 				.isInstanceOf(WebSocketClientHandshakeException.class);
 	}
 
+	/**
+	 * 이슈 #102 재현 조사(2026-09-03) 참고 — 기본 클라이언트는 전역 커넥션 풀
+	 * (`reactor.netty.http.client.HttpResources`)을 공유한다. 이전 테스트가 반납한 채널이
+	 * 재사용되며 핸드셰이크는 성공하는데 데이터 프레임이 조용히 안 오는 것으로 의심돼(CI
+	 * 스레드 덤프상 모든 스레드가 idle), `closesConnectionWithCode1000WhenClientClosesNormally`가
+	 * 이미 하던 것처럼 매번 새 연결을 강제해 이 가설을 검증한다.
+	 */
+	private static ReactorNettyWebSocketClient freshClient() {
+		return new ReactorNettyWebSocketClient(HttpClient.create(ConnectionProvider.newConnection()));
+	}
+
 	private List<String> exchange(String subject, UUID threadId, List<String> outbound, int expectedFrames) {
 		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
 		List<String> received = new CopyOnWriteArrayList<>();
 
-		new ReactorNettyWebSocketClient()
+		freshClient()
 				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
 					return WsTestExchange.exchange(session,
 							active -> Flux.fromIterable(outbound).map(active::textMessage), expectedFrames,
@@ -246,7 +255,7 @@ class CollabWebSocketHandlerTest {
 			List<String> frames, CountDownLatch ready, CountDownLatch received,
 			CountDownLatch completed, AtomicReference<Throwable> failure) {
 		String token = TestJwtSupport.signedJwt(subject, List.of("USER"));
-		return new ReactorNettyWebSocketClient()
+		return freshClient()
 				.execute(wsUri(threadId), allowedHeaders(), protocolHandler(token, session -> {
 					return WsTestExchange.exchange(session, active -> outbound.asFlux().map(active::textMessage), 1,
 							message -> {
