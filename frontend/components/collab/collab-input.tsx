@@ -34,10 +34,9 @@ export function CollabInput({
   const callsAi = mentionsAi(input);
 
   const submit = () => {
-    const content = input.trim();
-    if (content === '') return;
+    if (input.trim() === '') return;
 
-    if (!onSend(content)) {
+    if (!onSend(input)) {
       // 재연결될 때까지 쌓아 두지 않는다 — 뒤늦게 나가면 대화 순서가 어긋난다(ws-connection.ts).
       toast.error('연결이 끊겨 보내지 못했습니다. 다시 연결되면 보내주세요.');
       return;

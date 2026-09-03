@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from 'react';
 
+import { CitationsPanel } from '@/components/citations-panel';
 import { Markdown } from '@/components/markdown';
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
@@ -50,7 +51,19 @@ function MessageRow({ message }: { message: CollabMessage }) {
         {isAi ? 'AI' : message.from}
       </span>
       {isAi ? (
-        <Markdown>{message.content}</Markdown>
+        <>
+          {message.content !== '' && <Markdown>{message.content}</Markdown>}
+          {(message.citations.length > 0 ||
+            message.restrictedResultsOmitted) && (
+            <CitationsPanel
+              state={{
+                status: 'success',
+                citations: message.citations,
+                restrictedResultsOmitted: message.restrictedResultsOmitted,
+              }}
+            />
+          )}
+        </>
       ) : (
         <p className="whitespace-pre-wrap text-sm">{message.content}</p>
       )}
@@ -93,7 +106,7 @@ function useThreadTitle(threadId: string): string {
 }
 
 export function CollabRoom({ threadId }: { threadId: string }) {
-  const { state, connection, send } = useCollabRoom(threadId);
+  const { state, connection, send, dismissError } = useCollabRoom(threadId);
   const [containerRef, endRef] = useScrollToBottom<HTMLDivElement>();
   const title = useThreadTitle(threadId);
 
@@ -128,25 +141,22 @@ export function CollabRoom({ threadId }: { threadId: string }) {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="hidden w-48 shrink-0 border-r p-4 md:block">
-          <h2 className="mb-2 text-xs font-medium text-muted-foreground">
-            참여자 {state.participants.length}
-          </h2>
-          <ul className="flex flex-col gap-1">
-            {state.participants.map((participant) => (
-              <li key={participant} className="text-sm">
-                {participant}
-              </li>
-            ))}
-          </ul>
-        </aside>
-
         <main className="flex min-h-0 flex-1 flex-col">
           {/* 접근 거부가 아닌 오류는 방을 닫을 이유가 아니라 위에 얹어 알린다. */}
           {state.error && !isForbidden(state.error) && (
-            <p className="border-b bg-muted px-4 py-2 text-xs">
-              {state.error.message}
-            </p>
+            <div
+              role="alert"
+              className="flex items-center gap-3 border-b bg-muted px-4 py-2 text-xs"
+            >
+              <span className="flex-1">{state.error.message}</span>
+              <button
+                type="button"
+                className="shrink-0 underline underline-offset-2"
+                onClick={dismissError}
+              >
+                닫기
+              </button>
+            </div>
           )}
 
           <div
