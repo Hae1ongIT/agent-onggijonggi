@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
+import io.netty.handler.logging.LogLevel;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -27,6 +28,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.resources.ConnectionProvider;
+import reactor.netty.transport.logging.AdvancedByteBufFormat;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -35,7 +37,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@Import({ChatControllerTest.FakeChatModelConfig.class, FakeJwtDecoderConfig.class})
+@Import({ChatControllerTest.FakeChatModelConfig.class, FakeJwtDecoderConfig.class, Diag102WiretapConfig.class})
 @ExtendWith(ThreadDumpOnStallExtension.class)
 class CollabWebSocketHandlerTest {
 
@@ -233,7 +235,11 @@ class CollabWebSocketHandlerTest {
 	 * 이미 하던 것처럼 매번 새 연결을 강제해 이 가설을 검증한다.
 	 */
 	private static ReactorNettyWebSocketClient freshClient() {
-		return new ReactorNettyWebSocketClient(HttpClient.create(ConnectionProvider.newConnection()));
+		// #102 진단(임시): 클라이언트가 실제로 보내는 바이트를 wiretap으로 직접 본다.
+		// 서버 쪽 wiretap은 Diag102WiretapConfig가 붙인다 — 두 로그를 대조해 클라이언트가 보낸
+		// 바이트가 서버 소켓에 도달하는지 확인한다.
+		return new ReactorNettyWebSocketClient(HttpClient.create(ConnectionProvider.newConnection())
+				.wiretap("diag-102-wiretap-client", LogLevel.INFO, AdvancedByteBufFormat.TEXTUAL));
 	}
 
 	private List<String> exchange(String subject, UUID threadId, List<String> outbound, int expectedFrames) {
