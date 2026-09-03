@@ -89,18 +89,31 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		Sinks.One<Void> inboundDone = Sinks.one();
 		Sinks.One<Void> outboundOverflow = Sinks.one();
 
+		// 이슈 #102 진단용 임시 로그(2026-09-03) — 원인이 확정되면 이 메서드의 로그는 정리한다.
 		Flux<WsFrame> roomFrames = bufferForConnection(
 				roomSessionRegistry.join(threadId, connectionId), outboundOverflow);
 
 		Flux<WsFrame> inboundResponses = session.receive()
+				.doOnSubscribe(subscription -> log.info(
+						"[diag-102] inboundResponses(session.receive) subscribed threadId={} connectionId={}",
+						threadId, connectionId))
 				.concatMap(message -> handleInbound(message, threadId, userId))
 				.doFinally(ignored -> inboundDone.tryEmitEmpty());
 
 		Flux<WebSocketMessage> outbound = Flux.merge(roomFrames, inboundResponses)
 				.takeUntilOther(inboundDone.asMono())
+				.doOnNext(frame -> log.info("[diag-102] outbound frame about to serialize threadId={} frame={}",
+						threadId, frame))
 				.map(frame -> session.textMessage(serialize(frame)));
 
-		Mono<Void> messageLoop = session.send(outbound).then(session.close(CloseStatus.NORMAL));
+		Mono<Void> messageLoop = session.send(outbound)
+				.doOnSubscribe(subscription -> log.info(
+						"[diag-102] session.send subscribed(=merge subscription starts) threadId={} connectionId={}",
+						threadId, connectionId))
+				.doFinally(signal -> log.info(
+						"[diag-102] session.send finished threadId={} connectionId={} signal={}",
+						threadId, connectionId, signal))
+				.then(session.close(CloseStatus.NORMAL));
 		Mono<Void> tokenExpiry = tokenExpiresAt == null
 				? Mono.never()
 				: Mono.delay(durationUntil(tokenExpiresAt)).then(session.close(TOKEN_EXPIRED));
@@ -135,9 +148,12 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		}
 
 		ChatMessageCommand command = new ChatMessageCommand(threadId, userId, inbound.content(), traceId);
+		log.info("[diag-102] handleInbound reached broadcast call threadId={} traceId={}", threadId, traceId);
 		try {
 			roomSessionRegistry.broadcast(command.threadId(),
 					new ChatMessageFrame(command.threadId(), command.from(), command.content()));
+			log.info("[diag-102] handleInbound broadcast call returned normally threadId={} traceId={}",
+					threadId, traceId);
 			return Mono.empty();
 		} catch (RuntimeException error) {
 			log.error("WebSocket room broadcast failed threadId={} traceId={}", threadId, traceId, error);

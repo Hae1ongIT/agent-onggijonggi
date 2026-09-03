@@ -58,12 +58,18 @@ jobs:
 
       # ThreadDumpOnStallExtension(이슈 #107)이 실패한 테스트에 한해서만 남기는 스레드 덤프.
       # 평소엔 디렉터리 자체가 안 생기므로 if-no-files-found: ignore로 조용히 건너뛴다.
-      - name: 스레드 덤프 아티팩트 업로드
+      #
+      # test-results/test/ (JUnit XML)도 같이 올린다 — #102 진단용 로그(RoomSessionRegistry·
+      # CollabWebSocketHandler의 [diag-102] 태그)가 콘솔이 아니라 각 테스트의 <system-out>에만
+      # 남기 때문이다. 원인이 확정되면 이 스텝과 진단 로그를 함께 정리한다.
+      - name: 스레드 덤프·테스트 로그 아티팩트 업로드
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: thread-dumps
-          path: backend/api/build/test-results/thread-dumps/
+          path: |
+            backend/api/build/test-results/thread-dumps/
+            backend/api/build/test-results/test/
           if-no-files-found: ignore
 
   # frontend — 타입 검사가 본체다.

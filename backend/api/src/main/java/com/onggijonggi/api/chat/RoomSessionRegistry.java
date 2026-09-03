@@ -5,6 +5,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
@@ -18,6 +20,9 @@ import reactor.core.publisher.Sinks;
 @Component
 public class RoomSessionRegistry {
 
+	// 이슈 #102 진단용 임시 로그(2026-09-03) — 원인이 확정되면 이 클래스의 로그는 정리한다.
+	private static final Logger log = LoggerFactory.getLogger(RoomSessionRegistry.class);
+
 	private static final int WARMUP_BUFFER_SIZE = 1;
 
 	private final ConcurrentMap<UUID, RoomState> rooms = new ConcurrentHashMap<>();
@@ -28,15 +33,19 @@ public class RoomSessionRegistry {
 			joined.add(connectionId);
 			return joined;
 		});
+		log.info("[diag-102] join threadId={} connectionId={} roomIdentity={}", threadId, connectionId,
+				System.identityHashCode(room));
 		return room.frames();
 	}
 
 	public void broadcast(UUID threadId, WsFrame frame) {
 		RoomState room = rooms.get(threadId);
+		log.info("[diag-102] broadcast threadId={} roomFound={} roomIdentity={}", threadId, room != null,
+				room == null ? null : System.identityHashCode(room));
 		if (room == null) {
 			throw new IllegalStateException("room is not registered: " + threadId);
 		}
-		room.emit(frame);
+		room.emit(frame, threadId);
 	}
 
 	public void leave(UUID threadId, UUID connectionId) {
@@ -44,6 +53,7 @@ public class RoomSessionRegistry {
 			if (!current.removeAndCompleteIfEmpty(connectionId)) {
 				return current;
 			}
+			log.info("[diag-102] leave completes room threadId={} connectionId={}", threadId, connectionId);
 			return null;
 		});
 	}
@@ -70,11 +80,17 @@ public class RoomSessionRegistry {
 		}
 
 		Flux<WsFrame> frames() {
-			return frames.asFlux();
+			return frames.asFlux()
+					.doOnSubscribe(subscription -> log.info("[diag-102] roomFrames subscribed identity={}",
+							System.identityHashCode(this)))
+					.doOnNext(frame -> log.info("[diag-102] roomFrames emitted downstream identity={} frame={}",
+							System.identityHashCode(this), frame));
 		}
 
-		synchronized void emit(WsFrame frame) {
+		synchronized void emit(WsFrame frame, UUID threadId) {
 			Sinks.EmitResult result = frames.tryEmitNext(frame);
+			log.info("[diag-102] tryEmitNext threadId={} result={} identity={}", threadId, result,
+					System.identityHashCode(this));
 			if (result.isFailure()) {
 				throw new IllegalStateException("room frame emission failed: " + result);
 			}
