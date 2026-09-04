@@ -12,7 +12,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const TYPE_DECLARATION = /^\s*(?:(?:public|protected|private|abstract|final|sealed|non-sealed|static)\s+)*(?:class|interface|record|enum|@interface)\s+[A-Za-z_$][\w$]*/m;
+// 타입 선언 앞에 애노테이션이 같은 줄로 와도(`@Component public class Foo {}`) 잡아야 한다 —
+// 안 그러면 아래 checkFile의 fail-closed 판정과 부딪혀 애노테이션 붙은 클래스가 전부 위반으로
+// 잘못 잡힌다. `@interface`는 애노테이션 사용이 아니라 타입 키워드 자체라 제외한다.
+const TYPE_DECLARATION = /^\s*(?:@(?!interface\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|abstract|final|sealed|non-sealed|static)\s+)*(?:class|interface|record|enum|@interface)\s+[A-Za-z_$][\w$]*/m;
 const CLASS_NAME_HEADER = /^\s*\*\s*Class Name\s*:/m;
 const DESCRIPTION_HEADER = /^\s*\*\s*Description\s*:/m;
 const HEADER_EXAMPLE = [
@@ -21,6 +24,11 @@ const HEADER_EXAMPLE = [
 	' * Description : 01·CLIENT ↔ 03·CORE 채팅 스트리밍·이력 조회 계약 구현체.',
 	' */',
 ].join('\n');
+// 타입 선언이 없는 게 정상인 유일한 파일들. 이 목록 밖에서 TYPE_DECLARATION이 못 찾으면
+// "검사 대상 아님"이 아니라 위반으로 본다 — 정규식으로 자바 문법을 완전히 파싱하는 게
+// 아닌 이상 사각지대가 계속 생기는데, 못 읽었다고 조용히 통과시키면 그 사각지대에 걸린
+// 파일의 진짜 헤더 누락도 같이 못 잡는다.
+const NO_DECLARATION_EXPECTED = new Set(['package-info.java', 'module-info.java']);
 
 export function inScope(path) {
 	return path.replace(/\\/g, '/').endsWith('.java');
@@ -29,7 +37,11 @@ export function inScope(path) {
 export function checkFile(path, text = null) {
 	const content = text ?? readFileSync(path, 'utf8');
 	const declaration = TYPE_DECLARATION.exec(content);
-	if (declaration == null) return null;
+	if (declaration == null) {
+		const fileName = path.replace(/\\/g, '/').split('/').pop();
+		if (NO_DECLARATION_EXPECTED.has(fileName)) return null;
+		return { path, missing: ['타입 선언을 찾을 수 없음(검사기 한계일 수 있음)'] };
+	}
 
 	const headerArea = content.slice(0, declaration.index);
 	const missing = [];

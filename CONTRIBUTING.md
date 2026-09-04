@@ -157,12 +157,15 @@ PR을 열면 마이그레이션 SQL 검사가 자동으로 돈다. 나머지 항
 git config core.hooksPath .githooks
 ```
 
-마이그레이션 SQL을 커밋할 때 DB 식별자 이름과 설계 불변식을 검사한다. 걸렸다면 푸는 방법이 둘로 갈린다.
+커밋될 내용을 세 갈래로 검사한다 — 마이그레이션 SQL의 DB 식별자 이름과 설계 불변식,
+그리고 자바 파일의 클래스 헤더. 걸렸다면 푸는 방법이 다르다.
 
 - **용어집** — 아직 사전에 없는 단어를 썼다. [`scripts/glossary/words.md`](scripts/glossary/words.md)에
   단어를 등재하고 `node scripts/build-glossary.mjs`로 사전을 다시 만든 뒤 커밋한다.
 - **설계 불변식** — 설계 계약을 깨는 변경이다. 등재로는 풀리지 않으니 설계를 바꿔야 한다. 무엇을
   왜 막는지는 `scripts/validate-invariants.mjs` 상단 주석에 적혀 있다.
+- **자바 클래스 헤더** — 타입 선언 앞에 위 "코드 스타일" 절의 `Class Name :`/`Description :`
+  헤더가 없다. 그 예시 형태로 채운다.
 
 훅을 설치하지 않았거나 우회했더라도 PR에서 CI가 같은 검사를 돌린다.
 
