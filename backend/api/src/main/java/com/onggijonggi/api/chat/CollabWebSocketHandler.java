@@ -46,14 +46,18 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 
 	private final RoomSessionRegistry roomSessionRegistry;
 
+	private final CollabMessageDispatcher collabMessageDispatcher;
+
 	private final UserIdentityService userIdentityService;
 
 	private final ThreadMembershipService threadMembershipService;
 
 	public CollabWebSocketHandler(ObjectMapper objectMapper, RoomSessionRegistry roomSessionRegistry,
-			UserIdentityService userIdentityService, ThreadMembershipService threadMembershipService) {
+			CollabMessageDispatcher collabMessageDispatcher, UserIdentityService userIdentityService,
+			ThreadMembershipService threadMembershipService) {
 		this.objectMapper = objectMapper;
 		this.roomSessionRegistry = roomSessionRegistry;
+		this.collabMessageDispatcher = collabMessageDispatcher;
 		this.userIdentityService = userIdentityService;
 		this.threadMembershipService = threadMembershipService;
 	}
@@ -119,12 +123,13 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		UUID connectionId = UUID.randomUUID();
 		Sinks.One<Void> inboundDone = Sinks.one();
 		Sinks.One<Void> outboundOverflow = Sinks.one();
+		RoomSessionRegistry.RoomMembership membership = roomSessionRegistry.join(threadId, connectionId, userId);
 
 		Flux<WsFrame> roomFrames = bufferForConnection(
-				roomSessionRegistry.join(threadId, connectionId, userId), outboundOverflow);
+				membership.frames(), outboundOverflow);
 
 		Flux<WsFrame> inboundResponses = session.receive()
-				.concatMap(message -> handleInbound(message, threadId, userId))
+				.concatMap(message -> handleInbound(message, threadId, userId, membership.generation()))
 				.doFinally(ignored -> inboundDone.tryEmitEmpty());
 
 		Flux<WebSocketMessage> outbound = Flux.merge(roomFrames, inboundResponses)
@@ -141,10 +146,12 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				.then(session.close(SLOW_CONSUMER));
 
 		return Mono.firstWithSignal(messageLoop, tokenExpiry, slowConsumer)
-				.doFinally(ignored -> roomSessionRegistry.leave(threadId, connectionId, userId));
+				.doFinally(ignored -> roomSessionRegistry.leave(threadId, connectionId, userId)
+						.ifPresent(generation -> collabMessageDispatcher.closeGeneration(threadId, generation)));
 	}
 
-	private Mono<WsFrame> handleInbound(WebSocketMessage message, UUID threadId, UUID userId) {
+	private Mono<WsFrame> handleInbound(WebSocketMessage message, UUID threadId, UUID userId,
+			UUID roomGeneration) {
 		String traceId = newTraceId();
 		String payload = textPayload(message);
 		if (payload == null) {
@@ -167,9 +174,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 
 		ChatMessageCommand command = new ChatMessageCommand(threadId, userId, inbound.content(), traceId);
 		try {
-			roomSessionRegistry.broadcast(command.threadId(),
-					new ChatMessageFrame(command.threadId(), command.from(), command.content()));
-			return Mono.empty();
+			return Mono.justOrEmpty(collabMessageDispatcher.dispatch(command, roomGeneration));
 		} catch (RuntimeException error) {
 			log.error("WebSocket room broadcast failed threadId={} traceId={}", threadId, traceId, error);
 			return Mono.just(new ErrorFrame(threadId, "INTERNAL_ERROR",
