@@ -79,7 +79,7 @@ docker compose up -d --build                   # ③ 전체 기동 (첫 빌드 5
 
 ## 라이선스
 
-Copyright 2026 SUNJOOSOFT. 이 저장소는 [Apache License 2.0](LICENSE)을 따른다.
+Copyright 2026 [SUNJOOSOFT](http://sunjoosoft.com/). 이 저장소는 [Apache License 2.0](LICENSE)을 따른다.
 
 ### `frontend/` — Vercel ai-chatbot 포크
 
