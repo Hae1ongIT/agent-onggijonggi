@@ -12,9 +12,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-// 타입 선언 앞에 애노테이션이 같은 줄로 와도(`@Component public class Foo {}`) 잡아야 한다 —
-// 안 그러면 아래 checkFile의 fail-closed 판정과 부딪혀 애노테이션 붙은 클래스가 전부 위반으로
-// 잘못 잡힌다. `@interface`는 애노테이션 사용이 아니라 타입 키워드 자체라 제외한다.
+// 단순한 애노테이션이 타입 선언과 같은 줄에 와도(`@Component public class Foo {}`) 잡아야 한다.
+// 중첩 괄호를 가진 애노테이션 인자는 정규식 한계로 못 읽을 수 있으나, 그 경우 checkFile이
+// fail-closed 위반으로 처리한다. `@interface`는 애노테이션 사용이 아니라 타입 키워드 자체라 제외한다.
 const TYPE_DECLARATION = /^\s*(?:@(?!interface\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|abstract|final|sealed|non-sealed|static)\s+)*(?:class|interface|record|enum|@interface)\s+[A-Za-z_$][\w$]*/m;
 const CLASS_NAME_HEADER = /^\s*\*\s*Class Name\s*:/m;
 const DESCRIPTION_HEADER = /^\s*\*\s*Description\s*:/m;
