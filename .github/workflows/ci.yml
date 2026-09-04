@@ -29,6 +29,12 @@ jobs:
       - name: 설계 불변식 검사
         run: node scripts/validate-invariants.mjs backend/common/src/main/resources/db/migration/*.sql
 
+      - name: 자바 클래스 헤더 검사 테스트
+        run: node --test scripts/validate-java-class-header.test.mjs
+
+      - name: 자바 클래스 헤더 검사
+        run: node scripts/validate-java-class-header.mjs --tracked
+
   # backend — 컴파일·테스트 실패를 머지 전에 막는다.
   # 이 잡이 없어서 존재하지 않는 클래스를 참조하는 코드가 그대로 머지됐고(#38),
   # 테스트 전체가 컴파일되지 않는 상태를 뒤늦게 고쳐야 했다(#43).
