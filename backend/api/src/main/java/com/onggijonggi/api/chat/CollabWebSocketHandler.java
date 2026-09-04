@@ -40,7 +40,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 
 	private static final CloseStatus SLOW_CONSUMER = new CloseStatus(1011, "outbound buffer overflow");
 
-	private static final Set<String> SERVER_ONLY_TYPES = Set.of("chat.answer", "presence.join", "error");
+	private static final Set<String> SERVER_ONLY_TYPES = Set.of("chat.answer", "presence.join", "presence.leave", "error");
 
 	private final ObjectMapper objectMapper;
 
@@ -121,7 +121,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		Sinks.One<Void> outboundOverflow = Sinks.one();
 
 		Flux<WsFrame> roomFrames = bufferForConnection(
-				roomSessionRegistry.join(threadId, connectionId), outboundOverflow);
+				roomSessionRegistry.join(threadId, connectionId, userId), outboundOverflow);
 
 		Flux<WsFrame> inboundResponses = session.receive()
 				.concatMap(message -> handleInbound(message, threadId, userId))
@@ -141,7 +141,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				.then(session.close(SLOW_CONSUMER));
 
 		return Mono.firstWithSignal(messageLoop, tokenExpiry, slowConsumer)
-				.doFinally(ignored -> roomSessionRegistry.leave(threadId, connectionId));
+				.doFinally(ignored -> roomSessionRegistry.leave(threadId, connectionId, userId));
 	}
 
 	private Mono<WsFrame> handleInbound(WebSocketMessage message, UUID threadId, UUID userId) {
