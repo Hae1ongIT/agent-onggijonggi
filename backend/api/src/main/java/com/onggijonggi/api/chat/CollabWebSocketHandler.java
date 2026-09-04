@@ -173,11 +173,26 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		}
 
 		ChatMessageCommand command = new ChatMessageCommand(threadId, userId, inbound.content(), traceId);
+		return threadMembershipService.isActiveParticipant(threadId, userId)
+				.flatMap(participant -> participant
+						? dispatch(command, roomGeneration, traceId)
+						: Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
+								"이 방에 메시지를 보낼 권한이 없습니다.", traceId)));
+	}
+
+	/**
+	* 입장 인가는 연결할 때 한 번뿐이라, 그 뒤에 참가자에서 빠진 사람이 같은 연결로 계속 말할 수
+	* 있다. 그래서 메시지마다 다시 확인한다. 연결은 닫지 않는다 — 형식이 틀린 프레임을 에러
+	* 프레임만 돌려주고 넘어가는 것과 같은 처리다. 이미 열린 연결로 방송이 계속 가는 것(받기)은
+	* 이슈 #135가 다룬다.
+	*/
+	private Mono<WsFrame> dispatch(ChatMessageCommand command, UUID roomGeneration, String traceId) {
 		try {
 			return Mono.justOrEmpty(collabMessageDispatcher.dispatch(command, roomGeneration));
 		} catch (RuntimeException error) {
-			log.error("WebSocket room broadcast failed threadId={} traceId={}", threadId, traceId, error);
-			return Mono.just(new ErrorFrame(threadId, "INTERNAL_ERROR",
+			log.error("WebSocket room broadcast failed threadId={} traceId={}",
+					command.threadId(), traceId, error);
+			return Mono.just(new ErrorFrame(command.threadId(), "INTERNAL_ERROR",
 					"메시지를 방송하지 못했습니다.", traceId));
 		}
 	}
