@@ -2,6 +2,7 @@ package com.onggijonggi.api.chat;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -25,12 +26,12 @@ public class RoomSessionRegistry {
 	private final ConcurrentMap<UUID, RoomState> rooms = new ConcurrentHashMap<>();
 
 	/**
-	 * 연결을 방에 등록하고 그 방의 프레임 스트림을 돌려준다. 그 사용자의 첫 연결이고 이미 있던
-	 * 참여자가 하나라도 있으면 그들에게 입장을 알린다 — 첫 연결이면 알릴 상대가 없어 아무것도
+	 * 연결을 방에 등록하고 그 방의 세대와 프레임 스트림을 돌려준다. 그 사용자의 첫 연결이고 이미
+	 * 있던 참여자가 하나라도 있으면 그들에게 입장을 알린다 — 첫 연결이면 알릴 상대가 없어 아무것도
 	 * 내지 않는다. 이 구분은 취향이 아니라 필요다: sink의 warm-up 버퍼는 한 칸뿐이라, 빈 방에
 	 * 프레임을 밀어 넣으면 그 자리가 채워져 뒤이어 오는 첫 메시지가 밀려난다(이슈 #102).
 	 */
-	public Flux<WsFrame> join(UUID threadId, UUID connectionId, UUID userId) {
+	public RoomMembership join(UUID threadId, UUID connectionId, UUID userId) {
 		RoomState room = rooms.compute(threadId, (ignored, current) -> {
 			RoomState joined = current == null ? new RoomState() : current;
 			if (joined.add(connectionId, userId)) {
@@ -38,27 +39,36 @@ public class RoomSessionRegistry {
 			}
 			return joined;
 		});
-		return room.frames();
+		return new RoomMembership(room.generation(), room.frames());
 	}
 
-	public void broadcast(UUID threadId, WsFrame frame) {
+	/**
+	 * 현재 방 세대에만 프레임을 방송한다.
+	 *
+	 * @return 방이 없거나 generation이 달라 stale이면 {@code false}; 현재 sink 고장은 예외로 전파한다.
+	 */
+	public boolean broadcastIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
 		RoomState room = rooms.get(threadId);
-		if (room == null) {
-			throw new IllegalStateException("room is not registered: " + threadId);
+		if (room == null || !room.generation().equals(roomGeneration)) {
+			return false;
 		}
-		room.emit(frame);
+		return room.emitIfActive(frame);
 	}
 
 	/**
 	 * 연결을 방에서 빼고, 그 사용자의 마지막 연결이었다면 남은 참여자에게 퇴장을 알린다. 같은
 	 * 사용자의 다른 연결이 남아 있으면 그 사람은 아직 방에 있으므로 알리지 않는다. 방의 마지막
 	 * 연결이었다면 방이 사라지므로 역시 알리지 않는다 — 받을 사람도 없고, 사라진 방에
-	 * broadcast하면 예외가 된다.
+	 * 방송하면 그 프레임은 아무 데도 가지 않는다.
+	 *
+	 * @return 마지막 연결이 퇴장해 방이 완전히 비면 그 방 세대를, 아니면 빈 Optional을 반환한다.
 	 */
-	public void leave(UUID threadId, UUID connectionId, UUID userId) {
+	public Optional<UUID> leave(UUID threadId, UUID connectionId, UUID userId) {
+		UUID[] emptiedGeneration = new UUID[1];
 		rooms.computeIfPresent(threadId, (ignored, current) -> {
 			Departure departure = current.remove(connectionId);
 			if (departure == Departure.ROOM_EMPTY) {
+				emptiedGeneration[0] = current.generation();
 				return null;
 			}
 			if (departure == Departure.USER_GONE) {
@@ -66,6 +76,10 @@ public class RoomSessionRegistry {
 			}
 			return current;
 		});
+		return Optional.ofNullable(emptiedGeneration[0]);
+	}
+
+	public record RoomMembership(UUID generation, Flux<WsFrame> frames) {
 	}
 
 	/**
@@ -91,6 +105,10 @@ public class RoomSessionRegistry {
 		/** connectionId에서 그 연결을 연 userId로. 한 사용자가 탭·재연결로 여러 연결을 가질 수 있다. */
 		private final Map<UUID, UUID> connections = new HashMap<>();
 
+		private final UUID generation = UUID.randomUUID();
+
+		private boolean active = true;
+
 		private final Sinks.Many<WsFrame> frames = Sinks.many()
 				.multicast()
 				.onBackpressureBuffer(WARMUP_BUFFER_SIZE, false);
@@ -107,12 +125,18 @@ public class RoomSessionRegistry {
 			return hadOthers && userIsNew;
 		}
 
+		UUID generation() {
+			return generation;
+		}
+
 		/**
-		 * 연결을 방에서 빼고 그 결과를 돌려준다. 방이 비면 sink를 종결한다 — 그 방은 곧 버려진다.
+		 * 연결을 방에서 빼고 그 결과를 돌려준다. 방이 비면 sink를 종결하고 이 방을 비활성으로
+		 * 표시한다 — 곧 버려질 방이고, 그 뒤 남은 세대로 들어오는 방송은 여기서 걸러야 한다.
 		 */
 		synchronized Departure remove(UUID connectionId) {
 			UUID userId = connections.remove(connectionId);
 			if (connections.isEmpty()) {
+				active = false;
 				frames.tryEmitComplete();
 				return Departure.ROOM_EMPTY;
 			}
@@ -136,11 +160,15 @@ public class RoomSessionRegistry {
 			frames.tryEmitNext(frame);
 		}
 
-		synchronized void emit(WsFrame frame) {
+		synchronized boolean emitIfActive(WsFrame frame) {
+			if (!active) {
+				return false;
+			}
 			Sinks.EmitResult result = frames.tryEmitNext(frame);
 			if (result.isFailure()) {
 				throw new IllegalStateException("room frame emission failed: " + result);
 			}
+			return true;
 		}
 	}
 
