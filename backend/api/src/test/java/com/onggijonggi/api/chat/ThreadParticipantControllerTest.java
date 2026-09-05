@@ -64,7 +64,13 @@ class ThreadParticipantControllerTest {
 
 		invite(threadId, "repeat-owner", "repeat-member").expectStatus().isNoContent();
 
-		assertThat(participantsAs(threadId, "repeat-owner").split("\"subject\"", -1)).hasSize(3);
+		restTestClient.get()
+				.uri("/api/collab/threads/{threadId}/participants", threadId)
+				.header(HttpHeaders.AUTHORIZATION, bearer("repeat-owner"))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$.length()").isEqualTo(2);
 	}
 
 	/** 강퇴를 밴으로 다루지 않는다. 과거 행은 남고 새 참가 행이 생긴다. */
@@ -198,10 +204,19 @@ class ThreadParticipantControllerTest {
 	void anyParticipantCanSeeTheRoster() {
 		UUID threadId = rooms.openRoom("roster-owner", "roster-member");
 
-		String body = participantsAs(threadId, "roster-member");
-
-		assertThat(body).contains("\"subject\":\"roster-owner\"", "\"role\":\"OWNER\"");
-		assertThat(body).contains("\"subject\":\"roster-member\"", "\"role\":\"MEMBER\"");
+		// role·subject를 인덱스로 짝지어 확인한다 — 문자열에 둘 다 나타나기만 하면 통과하는
+		// 검증은 role이 서로 뒤바뀐 응답도 놓친다. 서비스가 role 오름차순(OWNER 먼저)으로
+		// 정렬해 내려주므로 순서가 결정적이다.
+		restTestClient.get()
+				.uri("/api/collab/threads/{threadId}/participants", threadId)
+				.header(HttpHeaders.AUTHORIZATION, bearer("roster-member"))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$[0].subject").isEqualTo("roster-owner")
+				.jsonPath("$[0].role").isEqualTo("OWNER")
+				.jsonPath("$[1].subject").isEqualTo("roster-member")
+				.jsonPath("$[1].role").isEqualTo("MEMBER");
 	}
 
 	@Test
