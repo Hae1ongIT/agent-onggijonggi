@@ -199,6 +199,48 @@ class ThreadParticipantControllerTest {
 				.expectStatus().isEqualTo(HttpStatus.FORBIDDEN);
 	}
 
+	/**
+	* 비참여자에게 404를 주는 규칙은 세 메서드가 공유하지만, remove는 자기 자신인지 판정이
+	* subject 비교로 바뀌면서(순서 버그 수정) 내부 경로가 나머지 둘과 달라졌다 — 별도로 잠가둔다.
+	*/
+	@Test
+	void anOutsiderCannotRemoveAnyone() {
+		UUID threadId = rooms.openRoom("remove-outsider-owner", "remove-outsider-member");
+		rooms.user("remove-outsider-stranger");
+
+		remove(threadId, "remove-outsider-stranger", "remove-outsider-member")
+				.expectStatus().isNotFound();
+	}
+
+	@Test
+	void anOutsiderCannotTransferOwnership() {
+		UUID threadId = rooms.openRoom("transfer-outsider-owner", "transfer-outsider-member");
+		rooms.user("transfer-outsider-stranger");
+
+		transferOwner(threadId, "transfer-outsider-stranger", "transfer-outsider-member")
+				.expectStatus().isNotFound();
+	}
+
+	@Test
+	void invitingWithABlankSubjectIsRejected() {
+		UUID threadId = rooms.openRoom("invite-blank-owner");
+
+		invite(threadId, "invite-blank-owner", "")
+				.expectStatus().isBadRequest()
+				.expectBody()
+				.jsonPath("$.error.code").isEqualTo("VALIDATION_ERROR");
+	}
+
+	@Test
+	void transferringWithABlankSubjectIsRejected() {
+		UUID threadId = rooms.openRoom("transfer-blank-owner");
+
+		transferOwner(threadId, "transfer-blank-owner", "")
+				.expectStatus().isBadRequest()
+				.expectBody()
+				.jsonPath("$.error.code").isEqualTo("VALIDATION_ERROR");
+	}
+
 	/** 명단은 참가자면 누구나 본다 — 제거·위임 대상을 지목하려면 먼저 누가 있는지 알아야 한다. */
 	@Test
 	void anyParticipantCanSeeTheRoster() {
