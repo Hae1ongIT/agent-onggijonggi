@@ -55,8 +55,7 @@ public class CollabThreadController {
 	/** 어떤 방을 내려줄지 고르는 것은 서버 몫이라, 호출자가 참가자인 방만 나간다. */
 	@GetMapping("/api/collab/threads")
 	public Flux<CollabThreadSummary> listThreads() {
-		return currentActorProvider.currentActor()
-				.map(CurrentActor::userId)
+		return actorUserId()
 				.flatMap(userId -> Mono.fromCallable(() -> joinedCollabThreads(userId))
 						.subscribeOn(Schedulers.boundedElastic()))
 				.flatMapMany(Flux::fromIterable);
@@ -86,8 +85,8 @@ public class CollabThreadController {
 	@DeleteMapping("/api/collab/threads/{threadId}/participants/{subject}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
 	public Mono<Void> removeParticipant(@PathVariable UUID threadId, @PathVariable String subject) {
-		return actorUserId()
-				.flatMap(userId -> threadParticipantService.remove(threadId, userId, subject));
+		return currentActorProvider.currentActor()
+				.flatMap(actor -> threadParticipantService.remove(threadId, actor.userId(), actor.subject(), subject));
 	}
 
 	/** 스레드의 OWNER 자리를 교체한다. OWNER가 방을 떠나려면 이걸 먼저 해야 한다. */

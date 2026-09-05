@@ -76,16 +76,22 @@ public class ThreadParticipantService {
 	/**
 	* remove: 대상이 호출자 자신이면 자진 탈퇴, 아니면 OWNER의 제거다. 한 엔드포인트로 묶은 대신
 	* 여기서 갈라, 끝난 이유(end_rsn)를 상황에 맞게 채운다.
+	*
+	* 자기 자신인지는 subject 문자열로 비교한다 — target을 내부 UUID로 미리 바꿔서 비교하면,
+	* 그 조회가 권한 검사보다 먼저 실행돼 OWNER가 아닌 사람도 "이 subject가 가입한 적 있는지"를
+	* 403/404 차이로 알아낼 수 있다(invite·transferOwner는 이미 권한 검사가 먼저였는데 이 메서드만
+	* 순서가 반대였다). actorSubject는 호출자가 이미 아는 자기 값이라 이 비교에 DB 조회가 없다.
+	* @param actorSubject 호출자 자신의 Keycloak subject(자진 탈퇴 판정용, 조회하지 않는다)
 	*/
-	public Mono<Void> remove(UUID threadId, UUID actorUserId, String targetSubject) {
+	public Mono<Void> remove(UUID threadId, UUID actorUserId, String actorSubject, String targetSubject) {
 		return Mono.<Void>fromCallable(() -> {
 					ThrMbr actor = requireActiveParticipant(threadId, actorUserId);
-					UUID targetUserId = resolveUserId(targetSubject);
-					if (targetUserId.equals(actorUserId)) {
+					if (targetSubject.equals(actorSubject)) {
 						leaveSelf(actor);
 						return null;
 					}
 					requireOwnerRole(actor);
+					UUID targetUserId = resolveUserId(targetSubject);
 					ThrMbr target = thrMbrRepository
 							.findByThrIdAndUserIdAndStatus(threadId, targetUserId, ThrMbrStatus.ACTIVE)
 							.orElseThrow(ThreadParticipantService::notParticipant);
