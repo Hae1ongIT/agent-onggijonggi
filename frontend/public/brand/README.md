@@ -15,6 +15,8 @@
 
 | 자산 | 파일 | 용도 |
 | --- | --- | --- |
+| 컬러 심벌 | `onggijonggi-mark.svg` | 32px 이상에서 쓰는 P3 기본 심벌 |
+| 16px 심벌 | `onggijonggi-mark-16.svg` | 16px 전용 축약 심벌 및 파비콘 프레임 기준 원본 |
 | 컬러 워드마크 | `logos/onggijonggi-wordmark.svg` | 심벌을 이미 인접하게 쓴 문서·화면에서 이름만 표시할 때 |
 | 검정·흰색 워드마크 | `logos/onggijonggi-wordmark-black.svg`, `logos/onggijonggi-wordmark-white.svg` | 단색 인쇄 또는 컬러 사용이 제한된 배경 |
 | 컬러 가로 조합 | `logos/onggijonggi-logo-horizontal.svg` | 기본 로고. README, 문서 머리말, 넓은 헤더 |
