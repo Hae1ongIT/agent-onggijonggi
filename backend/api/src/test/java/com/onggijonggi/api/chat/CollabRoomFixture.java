@@ -67,6 +67,20 @@ public class CollabRoomFixture {
 			thrMbrRepository.save(member);
 		}
 
+		/** #131 목록 필터링 테스트가 ARCHIVED 방을 미리 만들어 두는 데 쓴다. */
+		public void archiveRoom(UUID threadId) {
+			Thr thr = thrRepository.findById(threadId).orElseThrow();
+			thr.archive();
+			thrRepository.save(thr);
+		}
+
+		/** #131 쓰기 차단 테스트가 LOCKED 방을 미리 만들어 두는 데 쓴다. */
+		public void lockRoom(UUID threadId) {
+			Thr thr = thrRepository.findById(threadId).orElseThrow();
+			thr.lock();
+			thrRepository.save(thr);
+		}
+
 		public ThrMbrRole roleOf(UUID threadId, String subject) {
 			return activeMember(threadId, subject).getRole();
 		}

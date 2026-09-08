@@ -142,6 +142,87 @@ class CollabThreadControllerTest {
 		assertThat(body).contains("\"participants\":[\"threads-participants-owner\",\"threads-participants-member\"]");
 	}
 
+	/** ARCHIVED는 삭제가 아니라 목록에서 빠지는 것뿐이라, 별도 보관함 엔드포인트로 계속 찾을 수 있다(#131). */
+	@Test
+	void excludesArchivedThreadsFromTheDefaultListButKeepsThemInTheArchive() {
+		UUID thrId = rooms.openRoom("archive-owner", "archive-member");
+		rooms.archiveRoom(thrId);
+
+		assertThat(listThreadsAs("archive-member")).doesNotContain(thrId.toString());
+
+		String archivedBody = restTestClient.get()
+				.uri("/api/collab/threads/archived")
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("archive-member", List.of("USER")))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody(String.class)
+				.returnResult()
+				.getResponseBody();
+		assertThat(archivedBody).contains(thrId.toString());
+	}
+
+	@Test
+	void ownerCanLockAndThenArchiveAThread() {
+		UUID thrId = rooms.openRoom("lifecycle-owner", "lifecycle-member");
+
+		restTestClient.put()
+				.uri("/api/collab/threads/{threadId}/lock", thrId)
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("lifecycle-owner", List.of("USER")))
+				.exchange()
+				.expectStatus().isNoContent();
+
+		restTestClient.put()
+				.uri("/api/collab/threads/{threadId}/archive", thrId)
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("lifecycle-owner", List.of("USER")))
+				.exchange()
+				.expectStatus().isNoContent();
+
+		assertThat(listThreadsAs("lifecycle-member")).doesNotContain(thrId.toString());
+	}
+
+	@Test
+	void nonOwnerCannotLockAThread() {
+		UUID thrId = rooms.openRoom("lifecycle-owner-2", "lifecycle-member-2");
+
+		restTestClient.put()
+				.uri("/api/collab/threads/{threadId}/lock", thrId)
+				.header(HttpHeaders.AUTHORIZATION,
+						"Bearer " + TestJwtSupport.signedJwt("lifecycle-member-2", List.of("USER")))
+				.exchange()
+				.expectStatus().isForbidden();
+	}
+
+	/**
+	* thr_mbr·msg의 FK on delete cascade는 실제 Postgres 스키마(Flyway)에만 있다 — 이 테스트는
+	* Flyway를 끄고 Hibernate가 엔티티 매핑만으로 즉석 스키마를 만들어(application-test.properties),
+	* Thr·ThrMbr·Msg 사이에 연관관계 매핑이 없는 이 코드베이스 관례상 FK 자체가 안 생긴다. 그래서
+	* cascade 여부가 아니라 삭제 자체의 동작(OWNER 확인·204·thr 행 제거)만 여기서 확인한다.
+	*/
+	@Test
+	void ownerCanDeleteAThread() {
+		UUID thrId = rooms.openRoom("delete-owner", "delete-member");
+
+		restTestClient.delete()
+				.uri("/api/collab/threads/{threadId}", thrId)
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("delete-owner", List.of("USER")))
+				.exchange()
+				.expectStatus().isNoContent();
+
+		assertThat(thrRepository.findById(thrId)).isEmpty();
+	}
+
+	@Test
+	void nonOwnerCannotDeleteAThread() {
+		UUID thrId = rooms.openRoom("delete-owner-2", "delete-member-2");
+
+		restTestClient.delete()
+				.uri("/api/collab/threads/{threadId}", thrId)
+				.header(HttpHeaders.AUTHORIZATION,
+						"Bearer " + TestJwtSupport.signedJwt("delete-member-2", List.of("USER")))
+				.exchange()
+				.expectStatus().isForbidden();
+	}
+
 	@Test
 	void returnsSavedMessagesInSeqOrderForAParticipant() {
 		UUID thrId = rooms.openRoom("messages-owner", "messages-member");
