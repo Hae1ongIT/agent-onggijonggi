@@ -12,9 +12,9 @@
 export const AI_MENTION = '@AI';
 
 /**
- * `@AI` 멘션 여부. 뒤에 단어 경계를 두는 것은 `@AIssistant` 같은 말을 멘션으로 읽지 않기
- * 위해서다 — 한글은 단어 문자가 아니라서 `@AI야`는 그대로 멘션으로 잡힌다.
+ * 백엔드 AiMentionParser와 같은 경계 계약이다. 앞에는 유니코드 문자·숫자·밑줄이 올 수 없고,
+ * 뒤에는 ASCII 식별자 문자가 올 수 없다. 한글 접미는 호칭으로 보아 허용한다.
  */
 export function mentionsAi(content: string): boolean {
-  return /@ai\b/i.test(content);
+  return /(?<![\p{L}\p{N}_])@ai(?![A-Za-z0-9_])/iu.test(content);
 }

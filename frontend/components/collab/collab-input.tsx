@@ -34,10 +34,12 @@ export function CollabInput({
   const callsAi = mentionsAi(input);
 
   const submit = () => {
-    const content = input.trim();
-    if (content === '') return;
+    // 공백뿐인 입력만 막고, 정상 content의 앞뒤 공백은 지우지 않고 원문 그대로 보낸다 —
+    // 방에는 원문을 그대로 방송해야(#17 프로토콜) 내가 보낸 것과 남이 보는 것이 정확히
+    // 같아진다. trim()은 여기 빈 값 판정에만 쓰고 보내는 값에는 적용하지 않는다.
+    if (input.trim() === '') return;
 
-    if (!onSend(content)) {
+    if (!onSend(input)) {
       // 재연결될 때까지 쌓아 두지 않는다 — 뒤늦게 나가면 대화 순서가 어긋난다(ws-connection.ts).
       toast.error('연결이 끊겨 보내지 못했습니다. 다시 연결되면 보내주세요.');
       return;

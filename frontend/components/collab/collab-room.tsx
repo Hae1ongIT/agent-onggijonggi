@@ -2,11 +2,16 @@
 
 /********************************************************
  파일명 : collab-room.tsx (components/collab)
- 설 명 : 협업방 화면(이슈 #19) — 참여자·메시지 목록·입력창, 그리고 방에 들어가지 못했을 때의 처리.
+ 설 명 : 협업방 화면(이슈 #19) — 메시지 목록·입력창, 그리고 방에 들어가지 못했을 때의 처리.
 
  메시지 목록을 1:1 채팅의 messages.tsx로 그리지 않은 이유는 그쪽이 AI SDK Message(role만 있고
  보낸 사람이 없다)를 전제하기 때문이다. 협업방은 여러 사람의 메시지를 이름과 함께 보여줘야 한다.
  스크롤 붙임(use-scroll-to-bottom)과 마크다운 렌더는 그대로 재사용한다.
+
+ 참여자 목록 사이드바는 없다. presence.join으로 room-state.ts가 접속자 UUID는 이미 쌓고
+ 있지만, 그 값을 사람이 읽을 이름으로 바꿀 방법이 아직 없다(#128) — app_user에 표시 이름이
+ 없고, 있다 해도 이 프레임의 식별자 체계가 REST 쪽(subject)과 다르다(#130). 그 둘이 풀리기
+ 전까지 UUID 나열만 보여주는 패널은 만들지 않는다. 상태는 그대로 쌓아 재사용에 대비한다.
 
  메시지 시각과 AI 라벨(@FIN 같은 에이전트 구분)은 기획 시안에 있으나 그리지 않는다 — 프레임
  계약(#8)에 그 필드가 없어 서버가 보내주지 않는다. 계약이 넓어지면 여기에 붙일 자리다.
@@ -18,6 +23,7 @@
 
 import { useEffect, useState } from 'react';
 
+import { CitationsPanel } from '@/components/citations-panel';
 import { Markdown } from '@/components/markdown';
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
@@ -50,7 +56,19 @@ function MessageRow({ message }: { message: CollabMessage }) {
         {isAi ? 'AI' : message.from}
       </span>
       {isAi ? (
-        <Markdown>{message.content}</Markdown>
+        <>
+          {message.content !== '' && <Markdown>{message.content}</Markdown>}
+          {(message.citations.length > 0 ||
+            message.restrictedResultsOmitted) && (
+            <CitationsPanel
+              state={{
+                status: 'success',
+                citations: message.citations,
+                restrictedResultsOmitted: message.restrictedResultsOmitted,
+              }}
+            />
+          )}
+        </>
       ) : (
         <p className="whitespace-pre-wrap text-sm">{message.content}</p>
       )}
@@ -93,7 +111,7 @@ function useThreadTitle(threadId: string): string {
 }
 
 export function CollabRoom({ threadId }: { threadId: string }) {
-  const { state, connection, send } = useCollabRoom(threadId);
+  const { state, connection, send, dismissError } = useCollabRoom(threadId);
   const [containerRef, endRef] = useScrollToBottom<HTMLDivElement>();
   const title = useThreadTitle(threadId);
 
@@ -127,26 +145,24 @@ export function CollabRoom({ threadId }: { threadId: string }) {
         </span>
       </header>
 
+      {/* 참여자 사이드바 없음 — 파일 상단 설명 참고(#128·#130 전까지 UUID만 있다). */}
       <div className="flex min-h-0 flex-1">
-        <aside className="hidden w-48 shrink-0 border-r p-4 md:block">
-          <h2 className="mb-2 text-xs font-medium text-muted-foreground">
-            참여자 {state.participants.length}
-          </h2>
-          <ul className="flex flex-col gap-1">
-            {state.participants.map((participant) => (
-              <li key={participant} className="text-sm">
-                {participant}
-              </li>
-            ))}
-          </ul>
-        </aside>
-
         <main className="flex min-h-0 flex-1 flex-col">
           {/* 접근 거부가 아닌 오류는 방을 닫을 이유가 아니라 위에 얹어 알린다. */}
           {state.error && !isForbidden(state.error) && (
-            <p className="border-b bg-muted px-4 py-2 text-xs">
-              {state.error.message}
-            </p>
+            <div
+              role="alert"
+              className="flex items-center gap-3 border-b bg-muted px-4 py-2 text-xs"
+            >
+              <span className="flex-1">{state.error.message}</span>
+              <button
+                type="button"
+                className="shrink-0 underline underline-offset-2"
+                onClick={dismissError}
+              >
+                닫기
+              </button>
+            </div>
           )}
 
           <div

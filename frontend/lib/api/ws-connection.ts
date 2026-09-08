@@ -28,7 +28,7 @@
  *********************************************************/
 
 import { getSession, signIn } from 'next-auth/react';
-import { WS_PATH, bffWsUrl } from './config';
+import { bffWsUrl, collabWsPath } from './config';
 
 /** 서브프로토콜의 첫 번째 값 — 서버 WsSubProtocolBearerTokenConverter.PROTOCOL_NAME과 반드시 같아야 한다. */
 const PROTOCOL_NAME = 'access_token';
@@ -63,7 +63,7 @@ export interface SocketLike {
 
 interface WsConnectionDeps {
   /** URL 결정까지 소켓 팩토리가 맡는다 — 그래야 테스트가 window.location에 기대지 않는다.
-   * 경로를 인자로 받는 것은 협업방마다 쿼리가 달라지기 때문이다(이슈 #19). */
+   * 방 경로는 openWsConnection의 threadId로 결정한다. */
   createSocket: (protocols: string[], path: string) => SocketLike;
   getSession: typeof getSession;
   signIn: typeof signIn;
@@ -83,9 +83,6 @@ export interface WsConnectionOptions {
   onMessage: (data: string) => void;
   /** 재로그인이 강제되는 순간 불린다 — http.ts의 onForcedReauth와 같은 목적이다. */
   onForcedReauth?: () => void;
-  /** 붙을 경로. 협업방은 방을 쿼리로 지정하므로 호출부가 collabWsPath()로 만들어 넘긴다(이슈 #19).
-   * 기본값은 방을 지정하지 않는 1:1 경로다. */
-  path?: string;
   /** 연결이 열리고 끊길 때마다 불린다. 화면이 "연결 중" 표시와 전송 버튼 활성화를 이걸로 정한다. */
   onOpenChange?: (open: boolean) => void;
 }
@@ -148,6 +145,7 @@ function connectOnce(
  * deps는 테스트용 주입 지점이다(http.ts와 같은 패턴).
  */
 export function openWsConnection(
+  threadId: string,
   options: WsConnectionOptions,
   deps: WsConnectionDeps = defaultDeps,
 ): WsConnection {
@@ -156,7 +154,7 @@ export function openWsConnection(
   // send()가 봐야 하는 상태. 소켓 객체만으로는 지금 열려 있는지 알 수 없다 — SocketLike에
   // readyState를 넣지 않았다(테스트용 가짜 소켓이 그것까지 흉내 내야 하는 부담을 피한 선택이다).
   let isOpen = false;
-  const path = options.path ?? WS_PATH;
+  const path = collabWsPath(threadId);
 
   // 열림 여부를 이 계층도 알아야 하므로 화면에 알리는 콜백을 가로채 함께 갱신한다.
   const trackedOptions: WsConnectionOptions = {

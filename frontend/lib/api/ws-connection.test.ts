@@ -8,6 +8,8 @@ import {
   reconnectBackoffMs,
 } from './ws-connection';
 
+const THREAD_ID = '11111111-1111-4111-8111-111111111111';
+
 /** 테스트가 open·message·close 시점을 직접 잡을 수 있는 가짜 소켓. vitest 환경이 'node'라
  * 전역 WebSocket이 없고, 있더라도 close code를 마음대로 만들어낼 수 없다. */
 class FakeSocket implements SocketLike {
@@ -92,6 +94,7 @@ function harness(
   const onMessage = vi.fn();
 
   const connection = openWsConnection(
+    THREAD_ID,
     { onMessage, ...extraOptions },
     {
       createSocket: (protocols, path) => {
@@ -232,6 +235,7 @@ describe('openWsConnection', () => {
     const signIn = vi.fn(async () => undefined);
 
     openWsConnection(
+      THREAD_ID,
       { onMessage: vi.fn(), onForcedReauth },
       {
         createSocket: (protocols, path) => {
@@ -266,19 +270,10 @@ describe('openWsConnection', () => {
 });
 
 describe('openWsConnection - 협업방(이슈 #19)', () => {
-  it('경로를 넘기지 않으면 방 없는 기본 경로로 붙는다', async () => {
+  it('threadId를 경로 세그먼트로 넣어 방에 붙는다', async () => {
     const h = harness([{ accessToken: 't1' }]);
     const socket = await h.waitForSocket(1);
-    expect(socket.path).toBe('/api/ws');
-    h.connection.close();
-  });
-
-  it('넘긴 경로를 그대로 소켓에 쓴다 — 방은 쿼리로만 구분된다', async () => {
-    const h = harness([{ accessToken: 't1' }], {
-      path: '/api/ws?threadId=room-7',
-    });
-    const socket = await h.waitForSocket(1);
-    expect(socket.path).toBe('/api/ws?threadId=room-7');
+    expect(socket.path).toBe(`/api/ws/${THREAD_ID}`);
     h.connection.close();
   });
 
