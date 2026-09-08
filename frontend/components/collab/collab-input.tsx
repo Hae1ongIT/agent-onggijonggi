@@ -34,6 +34,9 @@ export function CollabInput({
   const callsAi = mentionsAi(input);
 
   const submit = () => {
+    // 공백뿐인 입력만 막고, 정상 content의 앞뒤 공백은 지우지 않고 원문 그대로 보낸다 —
+    // 방에는 원문을 그대로 방송해야(#17 프로토콜) 내가 보낸 것과 남이 보는 것이 정확히
+    // 같아진다. trim()은 여기 빈 값 판정에만 쓰고 보내는 값에는 적용하지 않는다.
     if (input.trim() === '') return;
 
     if (!onSend(input)) {
