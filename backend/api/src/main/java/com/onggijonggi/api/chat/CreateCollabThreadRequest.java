@@ -10,6 +10,6 @@ import jakarta.validation.constraints.Size;
  * @param title 새 협업방 제목
  */
 public record CreateCollabThreadRequest(
-        @NotBlank @Size(max = 255) String title
+		@NotBlank @Size(max = 255) String title
 ) {
 }

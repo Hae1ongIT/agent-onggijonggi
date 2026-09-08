@@ -17,19 +17,19 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class CollabThreadCreationService {
 
-    private final ThrRepository thrRepository;
-    private final ThrMbrRepository thrMbrRepository;
+	private final ThrRepository thrRepository;
+	private final ThrMbrRepository thrMbrRepository;
 
-    public CollabThreadCreationService(ThrRepository thrRepository, ThrMbrRepository thrMbrRepository) {
-        this.thrRepository = thrRepository;
-        this.thrMbrRepository = thrMbrRepository;
-    }
+	public CollabThreadCreationService(ThrRepository thrRepository, ThrMbrRepository thrMbrRepository) {
+		this.thrRepository = thrRepository;
+		this.thrMbrRepository = thrMbrRepository;
+	}
 
-    /** 호출자는 WebFlux 이벤트 루프 밖에서 이 blocking JPA 트랜잭션을 실행한다. */
-    @Transactional
-    public UUID createBlocking(UUID actorUserId, String title) {
-        Thr thread = thrRepository.save(Thr.collab(actorUserId, title));
-        thrMbrRepository.save(new ThrMbr(thread.getId(), actorUserId, ThrMbrRole.OWNER, actorUserId));
-        return thread.getId();
-    }
+	/** 호출자는 WebFlux 이벤트 루프 밖에서 이 blocking JPA 트랜잭션을 실행한다. */
+	@Transactional
+	public UUID createBlocking(UUID actorUserId, String title) {
+		Thr thread = thrRepository.save(Thr.collab(actorUserId, title));
+		thrMbrRepository.save(new ThrMbr(thread.getId(), actorUserId, ThrMbrRole.OWNER, actorUserId));
+		return thread.getId();
+	}
 }
