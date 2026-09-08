@@ -13,6 +13,10 @@
  app_user.id라, REST가 쓰는 subject와 맞지 않아 그 조회에 넣을 키가 없다. 식별자를 맞추는
  것은 #130이고, 그때 shortUserId 한 곳만 이름 조회로 바꾸면 된다.
 
+ 이 사이드바(#26)는 "지금 붙어 있는 사람"이고, 방에 들어올 자격이 있는 참여자 "명단" 관리는
+ REST 쪽 참여자 관리 API(#20)를 그대로 쓰는 별개 화면이다(#23) — 헤더의 ParticipantsSheet
+ 참고. 아래 aside 주석도 같은 구분을 반복한다.
+
  메시지 시각과 AI 라벨(@FIN 같은 에이전트 구분)은 기획 시안에 있으나 그리지 않는다 — 프레임
  계약(#8)에 그 필드가 없어 서버가 보내주지 않는다. 계약이 넓어지면 여기에 붙일 자리다.
 
@@ -38,6 +42,7 @@ import {
   useCollabRoom,
 } from '@/lib/collab/use-collab-room';
 import { CollabInput } from './collab-input';
+import { ParticipantsSheet } from './participants-sheet';
 
 const CONNECTION_LABEL: Record<RoomConnection, string> = {
   connecting: '연결 중…',
@@ -165,6 +170,7 @@ export function CollabRoom({ threadId }: { threadId: string }) {
       <header className="flex sticky top-0 items-center gap-2 border-b bg-background px-2 py-1.5">
         <SidebarToggle />
         <h1 className="text-sm font-semibold">{title}</h1>
+        <ParticipantsSheet threadId={threadId} />
         <span className="ml-auto pr-2 text-xs text-muted-foreground">
           {CONNECTION_LABEL[connection]}
         </span>

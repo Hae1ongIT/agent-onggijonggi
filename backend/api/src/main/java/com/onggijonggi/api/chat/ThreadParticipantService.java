@@ -54,7 +54,7 @@ public class ThreadParticipantService {
 	public Mono<List<ThreadParticipant>> list(UUID threadId, UUID actorUserId) {
 		return Mono.fromCallable(() -> {
 					requireActiveParticipant(threadId, actorUserId);
-					return activeParticipants(threadId);
+					return activeParticipants(threadId, actorUserId);
 				})
 				.subscribeOn(Schedulers.boundedElastic());
 	}
@@ -131,15 +131,20 @@ public class ThreadParticipantService {
 	/**
 	* 참가 행을 먼저 읽고 그 사용자들의 subject를 한 번에 붙인다. 내부 app_user.id는 응답에 담지
 	* 않는다 — WS 프레임이 쓰는 식별자와 어느 쪽으로 맞출지는 아직 정해지지 않았다.
+	*
+	* self는 이미 알고 있는 actorUserId와 각 행의 userId를 비교만 하면 되는 순수 판정이라
+	* 추가 조회가 없다(이슈 #23) — requireActiveParticipant가 이미 호출자 자신의 행을 확인했으므로
+	* 여기서 다시 DB를 보지 않아도 된다.
 	*/
-	private List<ThreadParticipant> activeParticipants(UUID threadId) {
+	private List<ThreadParticipant> activeParticipants(UUID threadId, UUID actorUserId) {
 		List<ThrMbr> members = thrMbrRepository.findByThrIdAndStatus(threadId, ThrMbrStatus.ACTIVE);
 		Map<UUID, String> subjectsByUserId = appUserRepository
 				.findAllById(members.stream().map(ThrMbr::getUserId).toList())
 				.stream()
 				.collect(Collectors.toMap(AppUser::getId, AppUser::getKeycloakSubj));
 		return members.stream()
-				.map(member -> new ThreadParticipant(subjectsByUserId.get(member.getUserId()), member.getRole()))
+				.map(member -> new ThreadParticipant(subjectsByUserId.get(member.getUserId()), member.getRole(),
+						member.getUserId().equals(actorUserId)))
 				.sorted(Comparator.comparing(ThreadParticipant::role)
 						.thenComparing(ThreadParticipant::subject, Comparator.nullsLast(String::compareTo)))
 				.toList();

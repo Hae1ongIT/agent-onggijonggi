@@ -50,3 +50,80 @@ export async function createCollabThread(
   }
   return res.json() as Promise<CreateCollabThreadResponse>;
 }
+
+/**
+ * GET .../participants 응답 항목(이슈 #23). displayName은 서버가 Keycloak Admin API로 미리
+ * 해석해 내려준다 — 클라이언트는 subject로 Keycloak을 다시 조회하지 않는다.
+ */
+export interface ThreadParticipant {
+  subject: string;
+  role: 'OWNER' | 'MEMBER';
+  self: boolean;
+  displayName: string;
+}
+
+/** 스레드의 ACTIVE 참여자 목록. 실패하면 예외를 던져 호출부(Sheet)가 안내하게 한다. */
+export async function fetchThreadParticipants(
+  threadId: string,
+): Promise<ThreadParticipant[]> {
+  const res = await authFetch(
+    bffUrl(`${COLLAB_THREADS_PATH}/${threadId}/participants`),
+  );
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+  return res.json() as Promise<ThreadParticipant[]>;
+}
+
+/** 참가자 초대. OWNER만 호출할 수 있고, 이미 참가 중인 사람을 다시 초대해도 성공이다(멱등). */
+export async function inviteParticipant(
+  threadId: string,
+  subject: string,
+): Promise<void> {
+  const res = await authFetch(
+    bffUrl(`${COLLAB_THREADS_PATH}/${threadId}/participants`),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject }),
+    },
+  );
+  // 성공은 204라 읽을 바디가 없다 — res.ok만으로 판단한다.
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+}
+
+/** 참가자 제거. subject가 호출자 자신이면 자진탈퇴, 아니면 OWNER의 타인 제거로 서버가 가른다. */
+export async function removeParticipant(
+  threadId: string,
+  subject: string,
+): Promise<void> {
+  const res = await authFetch(
+    bffUrl(
+      `${COLLAB_THREADS_PATH}/${threadId}/participants/${encodeURIComponent(subject)}`,
+    ),
+    { method: 'DELETE' },
+  );
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+}
+
+/** 소유권 위임. OWNER만 호출할 수 있고, 대상은 그 스레드의 ACTIVE MEMBER여야 한다. */
+export async function transferOwnership(
+  threadId: string,
+  subject: string,
+): Promise<void> {
+  const res = await authFetch(
+    bffUrl(`${COLLAB_THREADS_PATH}/${threadId}/owner`),
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+}
