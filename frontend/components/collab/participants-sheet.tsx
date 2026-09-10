@@ -59,6 +59,7 @@ import {
   type ThreadParticipant,
 } from '@/lib/api/collab';
 import { resolveChatError } from '@/lib/api/errors';
+import { createParticipantRefreshGate } from './participant-refresh';
 
 const ROLE_LABEL: Record<ThreadParticipant['role'], string> = {
   OWNER: '소유자',
@@ -96,21 +97,21 @@ export function ParticipantsSheet({
   const [inviteQuery, setInviteQuery] = useState('');
   const [candidates, setCandidates] = useState<InviteCandidate[]>([]);
   const [searching, setSearching] = useState(false);
-  const requestRevision = useRef(0);
+  const requestGate = useRef(createParticipantRefreshGate());
 
   const callerRole = participants.find((p) => p.self)?.role;
 
   const load = useCallback(async () => {
-    const requestId = ++requestRevision.current;
+    const requestId = requestGate.current.begin();
     setStatus('loading');
     setErrorMessage(null);
     try {
       const list = await fetchThreadParticipants(threadId);
-      if (requestId !== requestRevision.current) return;
+      if (!requestGate.current.isCurrent(requestId)) return;
       setParticipants(list);
       setStatus('loaded');
     } catch (err) {
-      if (requestId !== requestRevision.current) return;
+      if (!requestGate.current.isCurrent(requestId)) return;
       const { code, message } = resolveChatError(err as Error);
       if (code === 'NOT_FOUND') {
         // 더 이상 이 방의 참가자가 아니다 — 남이 먼저 제거했든 내가 방금 나갔든 처리는 같다.
@@ -156,10 +157,10 @@ export function ParticipantsSheet({
   }
 
   // 열 때의 최초 조회와 변경 프레임 뒤의 갱신을 한 경로로 둔다. 닫혀 있는 동안에는 프레임을
-  // 소비하지 않고, 늦게 끝난 이전 요청도 requestRevision으로 무시한다.
+  // 소비하지 않고, 늦게 끝난 이전 요청도 요청 세대 게이트로 무시한다.
   useEffect(() => {
     if (!open) {
-      requestRevision.current += 1;
+      requestGate.current.invalidate();
       return;
     }
     void load();
@@ -242,7 +243,7 @@ export function ParticipantsSheet({
         open={open}
         onOpenChange={(next) => {
           setOpen(next);
-          if (!next) requestRevision.current += 1;
+          if (!next) requestGate.current.invalidate();
         }}
       >
         <SheetTrigger asChild>
