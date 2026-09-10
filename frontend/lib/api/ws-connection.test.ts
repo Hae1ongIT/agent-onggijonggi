@@ -269,6 +269,51 @@ describe('openWsConnection', () => {
   });
 });
 
+describe('openWsConnection - [#181] 근-만료 토큰 무한 재발급', () => {
+  // 서버 수정(3e26900) 후 브라우저는 만료 강제 종료 시 4000을 정확히 받는다. 하지만
+  // getSession()/freshToken()이 매번 error 없는 근-만료 토큰을 돌려주면(Q4 미확정) 루프는
+  // 이어진다. 아래 두 테스트는 현재 프론트 동작을 고정한다 — 백오프 판정 수정(문서 3번)이
+  // 들어오면 뒤집는다(그때는 몇 사이클 뒤 forceReauth로 종료돼야 한다).
+
+  it('소켓이 열리자마자 4000으로 닫히면, 대기 없이 무한 재접속하고 재로그인하지 않는다', async () => {
+    const h = harness([{ accessToken: 'near-expiry' }]);
+
+    for (const n of [1, 2, 3, 4, 5]) {
+      const socket = await h.waitForSocket(n);
+      socket.open();
+      socket.serverClose(CLOSE_TOKEN_EXPIRED);
+    }
+    await h.waitForSocket(6);
+
+    // 만료 분기(if code === CLOSE_TOKEN_EXPIRED)는 세션 재조회 후 대기 없이 재접속한다.
+    expect(h.sleep).not.toHaveBeenCalled();
+    // 매 사이클 freshToken()을 부르지만 같은 토큰(error 없음)이라 null이 아니고 루프가 계속된다.
+    expect(h.getSession.mock.calls.length).toBeGreaterThanOrEqual(6);
+    // "열자마자 만료 2연속 → 재로그인" 상한은 !opened 경로에서만 걸려 도달하지 않는다.
+    expect(h.signIn).not.toHaveBeenCalled();
+
+    h.connection.close();
+  });
+
+  it('소켓이 열리자마자 1006으로 닫히면(서버 수정 전), 백오프가 1초에서 자라지 않는다', async () => {
+    const h = harness([{ accessToken: 'near-expiry' }]);
+
+    for (const n of [1, 2, 3, 4, 5]) {
+      const socket = await h.waitForSocket(n);
+      socket.open();
+      socket.serverClose(1006);
+    }
+    await h.waitForSocket(6);
+
+    // if (opened)가 매 사이클 backoffAttempt를 0으로 리셋 → 항상 reconnectBackoffMs(1) = 1000.
+    expect(h.sleep.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(h.sleep.mock.calls.every((call) => call[0] === 1000)).toBe(true);
+    expect(h.signIn).not.toHaveBeenCalled();
+
+    h.connection.close();
+  });
+});
+
 describe('openWsConnection - 협업방(이슈 #19)', () => {
   it('threadId를 경로 세그먼트로 넣어 방에 붙는다', async () => {
     const h = harness([{ accessToken: 't1' }]);
