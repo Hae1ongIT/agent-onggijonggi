@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -39,6 +41,8 @@ import reactor.core.scheduler.Schedulers;
 @Service
 public class ThreadParticipantService {
 
+	private static final Logger log = LoggerFactory.getLogger(ThreadParticipantService.class);
+
 	/** end_rsn은 고정 토큰만 쓴다 — 자유 입력을 받으면 나중에 집계·감사가 불가능해진다. */
 	private static final String SELF_LEAVE = "SELF_LEAVE";
 
@@ -47,19 +51,21 @@ public class ThreadParticipantService {
 	private final ThrMbrRepository thrMbrRepository;
 	private final ThrRepository thrRepository;
 	private final AppUserRepository appUserRepository;
-	private final ThrInvRepository thrInvRepository;
+	private final RoomSessionRegistry roomSessionRegistry;
 	private final KeycloakAdminClient keycloakAdminClient;
+	private final ThrInvRepository thrInvRepository;
 	private final InvitationAcceptanceService invitationAcceptanceService;
 
 	public ThreadParticipantService(ThrMbrRepository thrMbrRepository, ThrRepository thrRepository,
-			AppUserRepository appUserRepository, ThrInvRepository thrInvRepository,
-			KeycloakAdminClient keycloakAdminClient,
+			AppUserRepository appUserRepository, RoomSessionRegistry roomSessionRegistry,
+			KeycloakAdminClient keycloakAdminClient, ThrInvRepository thrInvRepository,
 			InvitationAcceptanceService invitationAcceptanceService) {
 		this.thrMbrRepository = thrMbrRepository;
 		this.thrRepository = thrRepository;
 		this.appUserRepository = appUserRepository;
-		this.thrInvRepository = thrInvRepository;
+		this.roomSessionRegistry = roomSessionRegistry;
 		this.keycloakAdminClient = keycloakAdminClient;
+		this.thrInvRepository = thrInvRepository;
 		this.invitationAcceptanceService = invitationAcceptanceService;
 	}
 
@@ -74,7 +80,8 @@ public class ThreadParticipantService {
 
 	/**
 	* invite: OWNER가 subject로 지목한 사람을 MEMBER로 들인다. 이미 ACTIVE면 아무것도 하지 않고
-	* 성공으로 답한다 — 초대가 이루려던 상태가 이미 성립해 있기 때문이다.
+	* 성공으로 답한다 — 초대가 이루려던 상태가 이미 성립해 있기 때문이다. 이미 ACTIVE였던 경우는
+	* 명단이 실제로 바뀌지 않았으므로 통지하지 않는다(이슈 #129).
 	* @param inviteeSubject 초대 대상의 Keycloak subject. 조회만 하고 새 계정을 만들지 않는다
 	*/
 	public Mono<Void> invite(UUID threadId, UUID actorUserId, String inviteeSubject) {
@@ -85,21 +92,24 @@ public class ThreadParticipantService {
 				})
 				.subscribeOn(Schedulers.boundedElastic())
 				.flatMap(invitee -> invitee
-						.map(userId -> joinNow(threadId, actorUserId, userId))
+						.map(userId -> joinNow(threadId, actorUserId, userId, inviteeSubject))
 						.orElseGet(() -> inviteForFirstLogin(threadId, actorUserId, inviteeSubject)));
 	}
 
 	/** 이미 로그인한 적 있는 사람은 지금처럼 곧바로 참가시킨다 — 기존 동작 그대로다(이슈 #127 결정). */
-	private Mono<Void> joinNow(UUID threadId, UUID actorUserId, UUID inviteeUserId) {
-		return Mono.<Void>fromCallable(() -> {
+	private Mono<Void> joinNow(UUID threadId, UUID actorUserId, UUID inviteeUserId, String inviteeSubject) {
+		return Mono.fromCallable(() -> {
 					if (thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, inviteeUserId,
 							ThrMbrStatus.ACTIVE)) {
-						return null;
+						return false;
 					}
 					saveIgnoringDuplicate(new ThrMbr(threadId, inviteeUserId, ThrMbrRole.MEMBER, actorUserId));
-					return null;
+					return true;
 				})
-				.subscribeOn(Schedulers.boundedElastic());
+				.subscribeOn(Schedulers.boundedElastic())
+				.flatMap(changed -> changed
+						? notifyParticipantChanged(threadId, ParticipantChangeAction.INVITED, inviteeSubject)
+						: Mono.<Void>empty());
 	}
 
 	/**
@@ -175,7 +185,9 @@ public class ThreadParticipantService {
 					thrMbrRepository.save(target);
 					return null;
 				})
-				.subscribeOn(Schedulers.boundedElastic());
+				.subscribeOn(Schedulers.boundedElastic())
+				.then(Mono.defer(
+						() -> notifyParticipantChanged(threadId, ParticipantChangeAction.REMOVED, targetSubject)));
 	}
 
 	/**
@@ -195,7 +207,9 @@ public class ThreadParticipantService {
 					}
 					return null;
 				})
-				.subscribeOn(Schedulers.boundedElastic());
+				.subscribeOn(Schedulers.boundedElastic())
+				.then(Mono.defer(() -> notifyParticipantChanged(threadId, ParticipantChangeAction.OWNER_TRANSFERRED,
+						targetSubject)));
 	}
 
 	/**
@@ -218,6 +232,33 @@ public class ThreadParticipantService {
 				.sorted(Comparator.comparing(ThreadParticipant::role)
 						.thenComparing(ThreadParticipant::subject, Comparator.nullsLast(String::compareTo)))
 				.toList();
+	}
+
+	/**
+	* 변경 대상이 지금 접속 중이 아닐 수 있어(초대 시나리오, 이슈 #129 본문) presence처럼 연결이
+	* 들고 있는 JWT claim을 재사용할 수 없다 — ParticipantView와 같은 패턴으로 KeycloakAdminClient를
+	* 조회해 displayName을 붙인다. 아무도 그 방을 듣고 있지 않으면 RoomSessionRegistry가 조용히
+	* 버린다.
+	*
+	* 호출부는 반드시 {@code Mono.defer(() -> notifyParticipantChanged(...))}로 감싼다 — 그냥
+	* {@code .then(notifyParticipantChanged(...))}로 쓰면 Java가 인자를 즉시 평가해 앞선
+	* fromCallable이 아직 구독도 되기 전에(즉 remove·transferOwner가 권한 검사·상태 검증을 통과
+	* 하기도 전에) keycloakAdminClient를 호출해 버린다.
+	*
+	* Keycloak 조회 실패는 삼키고 로그만 남긴다 — 이 시점엔 참가자 변경이 이미 DB에 커밋돼 있어,
+	* 통지 실패로 호출자에게 5xx를 돌려주면 실제로는 성공한 초대·제거·위임이 실패로 보인다
+	* (PersistingChatStreamService의 "저장 실패는 채팅을 막지 않는다"와 같은 원칙).
+	*/
+	private Mono<Void> notifyParticipantChanged(UUID threadId, ParticipantChangeAction action, String subject) {
+		return keycloakAdminClient.displayName(subject)
+				.map(displayName -> displayName.orElse(subject))
+				.doOnNext(displayName -> roomSessionRegistry.notifyIfListening(threadId,
+						new ParticipantChangedFrame(threadId, action, subject, displayName)))
+				.onErrorResume(error -> {
+					log.error("참여자 변경 통지 실패 threadId={} action={}", threadId, action, error);
+					return Mono.empty();
+				})
+				.then();
 	}
 
 	/** OWNER는 넘길 사람을 정하기 전에는 나갈 수 없다 — 소유자 없는 방을 만들지 않기 위해서다. */

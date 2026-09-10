@@ -2,6 +2,7 @@ package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -49,10 +50,13 @@ class ThreadParticipantServiceTest {
 	private AppUserRepository appUserRepository;
 
 	@Mock
-	private ThrInvRepository thrInvRepository;
+	private RoomSessionRegistry roomSessionRegistry;
 
 	@Mock
 	private KeycloakAdminClient keycloakAdminClient;
+
+	@Mock
+	private ThrInvRepository thrInvRepository;
 
 	@Mock
 	private InvitationAcceptanceService invitationAcceptanceService;
@@ -62,7 +66,7 @@ class ThreadParticipantServiceTest {
 	@BeforeEach
 	void setUp() {
 		service = new ThreadParticipantService(thrMbrRepository, thrRepository, appUserRepository,
-				thrInvRepository, keycloakAdminClient, invitationAcceptanceService);
+				roomSessionRegistry, keycloakAdminClient, thrInvRepository, invitationAcceptanceService);
 	}
 
 	/**
@@ -133,6 +137,137 @@ class ThreadParticipantServiceTest {
 		verify(appUserRepository, never()).findByKeycloakSubj(any());
 	}
 
+	/** 초대가 실제로 새 참가 행을 만들면 그 방 구독자 전원에게 통지해야 한다(이슈 #129). */
+	@Test
+	void inviteNotifiesTheRoomWhenANewParticipantIsAdded() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser inviteeAppUser = new AppUser("invitee-sub");
+		UUID inviteeUserId = inviteeAppUser.getId();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("invitee-sub")).thenReturn(Optional.of(inviteeAppUser));
+		when(thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, inviteeUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(false);
+		when(keycloakAdminClient.displayName("invitee-sub")).thenReturn(Mono.just(Optional.of("Invitee")));
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "invitee-sub")).verifyComplete();
+
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.INVITED, "invitee-sub",
+						"Invitee")));
+	}
+
+	/** 이미 ACTIVE인 사람을 다시 초대하면 명단이 바뀌지 않았으므로 통지하지 않는다(멱등, 이슈 #129). */
+	@Test
+	void inviteDoesNotNotifyWhenTheInviteeIsAlreadyActive() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser inviteeAppUser = new AppUser("invitee-sub");
+		UUID inviteeUserId = inviteeAppUser.getId();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("invitee-sub")).thenReturn(Optional.of(inviteeAppUser));
+		when(thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, inviteeUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(true);
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "invitee-sub")).verifyComplete();
+
+		verify(roomSessionRegistry, never()).notifyIfListening(any(), any());
+	}
+
+	/** OWNER가 다른 참가자를 제거하면 제거당한 본인을 포함해 그 방 전원에게 통지한다(이슈 #129). */
+	@Test
+	void removeByOwnerNotifiesTheRoomWithTheRemovedSubject() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser targetAppUser = new AppUser("target-sub");
+		UUID targetUserId = targetAppUser.getId();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(appUserRepository.findByKeycloakSubj("target-sub")).thenReturn(Optional.of(targetAppUser));
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, targetUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, targetUserId, ThrMbrRole.MEMBER, actorUserId)));
+		when(keycloakAdminClient.displayName("target-sub")).thenReturn(Mono.just(Optional.empty()));
+
+		StepVerifier.create(service.remove(threadId, actorUserId, "actor-sub", "target-sub")).verifyComplete();
+
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.REMOVED, "target-sub",
+						"target-sub")));
+	}
+
+	/** 자진 탈퇴도 참가자 명단이 바뀌는 일이라 남은 참가자에게 통지한다(이슈 #129). */
+	@Test
+	void selfLeaveNotifiesTheRoomWithTheActorsOwnSubject() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.MEMBER, actorUserId)));
+		when(keycloakAdminClient.displayName("actor-sub")).thenReturn(Mono.just(Optional.of("Actor")));
+
+		StepVerifier.create(service.remove(threadId, actorUserId, "actor-sub", "actor-sub")).verifyComplete();
+
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.REMOVED, "actor-sub", "Actor")));
+	}
+
+	/** 위임이 성공하면 새 OWNER의 subject를 실어 통지한다(이슈 #129). */
+	@Test
+	void transferOwnerNotifiesTheRoomWithTheNewOwnerSubject() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser targetAppUser = new AppUser("new-owner-sub");
+		UUID targetUserId = targetAppUser.getId();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(appUserRepository.findByKeycloakSubj("new-owner-sub")).thenReturn(Optional.of(targetAppUser));
+		when(thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, targetUserId, ThrMbrRole.MEMBER,
+				ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, targetUserId, ThrMbrRole.MEMBER, actorUserId)));
+		when(thrMbrRepository.transferOwnership(threadId, actorUserId, targetUserId)).thenReturn(2);
+		when(keycloakAdminClient.displayName("new-owner-sub")).thenReturn(Mono.just(Optional.of("New Owner")));
+
+		StepVerifier.create(service.transferOwner(threadId, actorUserId, "new-owner-sub")).verifyComplete();
+
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.OWNER_TRANSFERRED,
+						"new-owner-sub", "New Owner")));
+	}
+
+	/**
+	* Keycloak 조회가 실패해도 참여자 변경 자체는 이미 커밋돼 있으므로 호출자에게는 성공을
+	* 돌려줘야 한다(이슈 #129) — 통지 실패가 초대 응답까지 5xx로 끌고 가면 실제로는 성공한
+	* 작업이 실패로 보인다.
+	*/
+	@Test
+	void inviteSucceedsEvenWhenDisplayNameLookupFails() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser inviteeAppUser = new AppUser("invitee-sub");
+		UUID inviteeUserId = inviteeAppUser.getId();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("invitee-sub")).thenReturn(Optional.of(inviteeAppUser));
+		when(thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, inviteeUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(false);
+		when(keycloakAdminClient.displayName("invitee-sub"))
+				.thenReturn(Mono.error(new RuntimeException("keycloak down")));
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "invitee-sub")).verifyComplete();
+
+		verify(roomSessionRegistry, never()).notifyIfListening(any(), any());
+	}
+
 	/**
 	* 대상이 초대 처리 도중에 첫 로그인을 마친 경우다. 첫 조회는 미스라 대기 초대로 가지만, 그
 	* 사이에 app_user 행이 생기면 전환을 도는 쪽(첫 로그인 경로)은 아직 커밋되지 않은 우리 초대를
@@ -143,7 +278,6 @@ class ThreadParticipantServiceTest {
 	void inviteConvertsThePendingRowWhenTheInviteeLoggedInMeanwhile() {
 		UUID threadId = UUID.randomUUID();
 		UUID actorUserId = UUID.randomUUID();
-		UUID inviteeUserId = UUID.randomUUID();
 		AppUser invitee = new AppUser("late-sub");
 
 		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
