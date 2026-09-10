@@ -261,6 +261,27 @@ class ThreadParticipantControllerTest {
 				.jsonPath("$[1].role").isEqualTo("MEMBER");
 	}
 
+	/**
+	* self는 호출자 자신의 행에만 서고, displayName은 실 Keycloak이 없는 테스트 환경에서
+	* KeycloakAdminClient.displayName()이 WebClientException을 삼키고 빈 값을 돌려주므로
+	* subject로 대체된다(KeycloakAdminClient 클래스 주석 참고) — 둘 다 결정적으로 검증 가능하다.
+	*/
+	@Test
+	void theRosterMarksTheCallersOwnRowAndFillsDisplayNames() {
+		UUID threadId = rooms.openRoom("self-owner", "self-member");
+
+		restTestClient.get()
+				.uri("/api/collab/threads/{threadId}/participants", threadId)
+				.header(HttpHeaders.AUTHORIZATION, bearer("self-member"))
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$[0].self").isEqualTo(false)
+				.jsonPath("$[0].displayName").isEqualTo("self-owner")
+				.jsonPath("$[1].self").isEqualTo(true)
+				.jsonPath("$[1].displayName").isEqualTo("self-member");
+	}
+
 	@Test
 	void anOutsiderCannotSeeTheRoster() {
 		UUID threadId = rooms.openRoom("roster-closed-owner");

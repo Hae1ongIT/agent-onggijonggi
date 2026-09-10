@@ -122,9 +122,10 @@ public class CollabThreadController {
 
 	/** 명단은 참가자면 누구나 본다 — 제거·위임 대상을 지목하려면 먼저 누가 있는지 알아야 한다. */
 	@GetMapping("/api/collab/threads/{threadId}/participants")
-	public Flux<ThreadParticipant> listParticipants(@PathVariable UUID threadId) {
+	public Flux<ParticipantView> listParticipants(@PathVariable UUID threadId) {
 		return actorUserId()
 				.flatMap(userId -> threadParticipantService.list(threadId, userId))
+				.flatMap(this::withParticipantDisplayNames)
 				.flatMapMany(Flux::fromIterable);
 	}
 
@@ -232,6 +233,24 @@ public class CollabThreadController {
 
 	/** 참가자 subject까지만 담은 중간 형태 — 표시 이름은 방 여러 개를 다 모은 뒤에 한 번에 붙인다. */
 	private record ThreadWithSubjects(Thr thr, List<String> subjects) {
+	}
+
+	/**
+	* listParticipants 전용 표시 이름 해석. withDisplayNames와 같은 모양(스레드 전체에서 subject를
+	* 한 번만 모아 Keycloak Admin API를 호출)이지만, 이 엔드포인트 하나의 결과에서만 모아 해석한다 —
+	* summariesFor가 이미 하는 "스레드 여러 개를 가로지르는" 배치와 섞으면 그쪽 최적화가 깨진다
+	* (이슈 #23).
+	*/
+	private Mono<List<ParticipantView>> withParticipantDisplayNames(List<ThreadParticipant> participants) {
+		Set<String> subjects = participants.stream().map(ThreadParticipant::subject).collect(Collectors.toSet());
+		return Flux.fromIterable(subjects)
+				.flatMap(subject -> keycloakAdminClient.displayName(subject)
+						.map(displayName -> Map.entry(subject, displayName.orElse(subject))))
+				.collectMap(Map.Entry::getKey, Map.Entry::getValue)
+				.map(displayNamesBySubject -> participants.stream()
+						.map(participant -> new ParticipantView(participant.subject(), participant.role(),
+								participant.self(), displayNamesBySubject.get(participant.subject())))
+						.toList());
 	}
 
 	/**
