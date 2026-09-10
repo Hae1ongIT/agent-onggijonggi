@@ -39,3 +39,11 @@ dependencies {
 	// Hibernate ddl-auto가 엔티티 기준으로 즉석 생성한다(스키마 정합성이 아니라 서비스 로직 검증 목적).
 	testRuntimeOnly 'com.h2database:h2'
 }
+
+tasks.register('verifyFlywayMigrations', JavaExec) {
+	group = 'verification'
+	description = 'Applies every Flyway migration to the configured empty PostgreSQL database.'
+	dependsOn testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.onggijonggi.api.migration.FlywayMigrationVerifier'
+}
