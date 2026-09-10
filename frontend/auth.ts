@@ -33,6 +33,10 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
       },
     );
     const refreshed = await response.json();
+    // [#181 계측] 리프레시 결과 — 근본 원인 규명 후 제거한다.
+    console.info(
+      `[#181][auth] refresh status=${response.status} ok=${response.ok} hasToken=${!!refreshed.access_token} expiresIn=${refreshed.expires_in} err=${refreshed.error ?? 'none'}`,
+    );
     // 성공 응답인데 access_token이 없으면 실패로 간주한다 — "error 없이 토큰만 사라지는" 상태를 막는다.
     if (!response.ok || !refreshed.access_token) {
       throw refreshed;
@@ -87,13 +91,20 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         return token;
       }
 
+      // [#181 계측] accessTokenExpires가 실제로 세팅되는지 + 리프레시 게이트 판정 — 근본 원인 규명 후 제거한다.
+      const expIn =
+        typeof token.accessTokenExpires === 'number'
+          ? Math.round((token.accessTokenExpires - Date.now()) / 1000)
+          : 'unset';
       if (
         token.accessTokenExpires &&
         Date.now() < (token.accessTokenExpires as number)
       ) {
+        console.info(`[#181][auth] jwt: token still valid, skipping refresh (expIn=${expIn}s)`);
         return token;
       }
 
+      console.info(`[#181][auth] jwt: refreshing (expIn=${expIn}s, prevError=${token.error ?? 'none'})`);
       return refreshAccessToken(token);
     },
     async session({ session, token }) {

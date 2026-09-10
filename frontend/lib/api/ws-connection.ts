@@ -30,6 +30,18 @@
 import { getSession, signIn } from 'next-auth/react';
 import { bffWsUrl, collabWsPath } from './config';
 
+/** [#181 계측] JWT payload의 exp를 읽어 지금 대비 몇 초 남았는지 — 근본 원인 규명 후 제거한다. */
+function tokenSkewSeconds(token: string | null | undefined): number | null {
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    if (typeof payload.exp !== 'number') return null;
+    return Math.round(payload.exp - Date.now() / 1000);
+  } catch {
+    return null;
+  }
+}
+
 /** 서브프로토콜의 첫 번째 값 — 서버 WsSubProtocolBearerTokenConverter.PROTOCOL_NAME과 반드시 같아야 한다. */
 const PROTOCOL_NAME = 'access_token';
 
@@ -130,6 +142,10 @@ function connectOnce(
       if (typeof event.data === 'string') options.onMessage(event.data);
     });
     socket.addEventListener('close', (event) => {
+      // [#181 계측] 브라우저가 실제로 받는 close code/reason. 서버 의도(4000 등) ↔ 수신 코드 간극 확인용.
+      console.info(
+        `[#181][ws] close opened=${opened} code=${event.code} reason=${JSON.stringify((event as { reason?: string }).reason ?? '')}`,
+      );
       // 열린 적 없는 소켓의 close는 알릴 것이 없다 — 화면은 애초에 열림을 본 적이 없다.
       if (opened) options.onOpenChange?.(false);
       // code가 없는 close는 표준상 나오지 않지만, 온다면 정상 종료로 읽어 조용히 끊기는 것보다
@@ -174,6 +190,10 @@ export function openWsConnection(
    * 살아나지 않으므로 곧장 재로그인으로 보낸다(http.ts와 같은 판단). */
   const freshToken = async (): Promise<string | null> => {
     const session = await deps.getSession();
+    // [#181 계측] getSession()이 매번 돌려주는 토큰의 수명 + error 상태. 근-사망 토큰 무한 재발급 확인용.
+    console.info(
+      `[#181][ws] freshToken error=${session?.error ?? 'none'} hasToken=${!!session?.accessToken} skewSeconds=${tokenSkewSeconds(session?.accessToken)}`,
+    );
     if (session?.error === 'RefreshAccessTokenError' || !session?.accessToken) {
       await forceReauth();
       return null;
@@ -201,6 +221,11 @@ export function openWsConnection(
         },
       );
       if (closedByCaller || code === CLOSE_NORMAL) return;
+
+      // [#181 계측] 매 루프 반복의 상태 — opened가 매번 true라 백오프/가드가 리셋되는지 확인용.
+      console.info(
+        `[#181][ws] loop opened=${opened} code=${code} backoffAttempt=${backoffAttempt} failedHandshakes=${failedHandshakes} afterExpiry=${afterExpiry} expiryRetried=${expiryRetried}`,
+      );
 
       if (opened) {
         backoffAttempt = 0;

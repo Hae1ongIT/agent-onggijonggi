@@ -150,6 +150,14 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		Sinks.One<Void> outboundOverflow = Sinks.one();
 		RoomSessionRegistry.RoomMembership membership = roomSessionRegistry.join(threadId, connectionId, actor);
 
+		// [#181 계측] 핸드셰이크 통과 시점에 토큰이 exp 대비 몇 초 남았는지(음수면 이미 만료, 60초 유예로 통과).
+		// durationUntil이 ZERO를 돌려주는 구간인지 확인용 — 근본 원인 규명 후 제거한다.
+		Instant now = Instant.now();
+		long skewSeconds = tokenExpiresAt == null ? Long.MIN_VALUE
+				: Duration.between(now, tokenExpiresAt).toSeconds();
+		log.info("[#181] WS admit threadId={} connectionId={} sub={} tokenExp={} now={} skewSeconds={}",
+				threadId, connectionId, actor.subject(), tokenExpiresAt, now, skewSeconds);
+
 		// 참여자 스냅샷(#26)은 방송이 아니라 이 연결의 값이라, 방 버퍼 밖에서 맨 앞에 붙인다 —
 		// 느린 소비자용 버퍼 한 칸을 명단이 차지할 이유가 없다.
 		Flux<WsFrame> roomFrames = bufferForConnection(membership.frames(), outboundOverflow)
@@ -185,13 +193,22 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				.takeUntilOther(inboundDone.asMono())
 				.map(frame -> session.textMessage(serialize(frame)));
 
-		Mono<Void> messageLoop = session.send(outbound).then(session.close(CloseStatus.NORMAL));
+		// [#181 계측] 4개 종료 경로 중 매 사이클 어느 것이 이기는지 — .then(close) 앞에 경로별 로그.
+		Mono<Void> messageLoop = session.send(outbound)
+				.then(Mono.fromRunnable(() -> log.info(
+						"[#181] WS close via messageLoop(NORMAL 1000) threadId={} connectionId={}", threadId, connectionId)))
+				.then(session.close(CloseStatus.NORMAL));
+		Duration tokenExpiryDelay = tokenExpiresAt == null ? null : durationUntil(tokenExpiresAt);
 		Mono<Void> tokenExpiry = tokenExpiresAt == null
 				? Mono.never()
-				: Mono.delay(durationUntil(tokenExpiresAt)).then(session.close(TOKEN_EXPIRED));
+				: Mono.delay(tokenExpiryDelay)
+						.doOnNext(ignored -> log.info(
+								"[#181] WS close via tokenExpiry(4000) threadId={} connectionId={} plannedDelay={}",
+								threadId, connectionId, tokenExpiryDelay))
+						.then(session.close(TOKEN_EXPIRED));
 		Mono<Void> slowConsumer = outboundOverflow.asMono()
 				.doOnSuccess(ignored -> log.warn(
-						"Closing slow WebSocket consumer threadId={} connectionId={}", threadId, connectionId))
+						"[#181] WS close via slowConsumer(1011) threadId={} connectionId={}", threadId, connectionId))
 				.then(session.close(SLOW_CONSUMER));
 		// session.close(...)를 여기 직접 쓰면 자바가 .then()의 인자를 메서드 호출 시점에 바로
 		// 평가해, evict가 일어나기도 전에(이 메서드가 실행되는 즉시) 닫아버린다 — 마치
@@ -200,11 +217,18 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		// close()를 부르게 한다.
 		Mono<Void> evictedClose = evictionNotice.then()
 				.then(Mono.delay(EVICTED_FRAME_FLUSH_GRACE_PERIOD))
+				.doOnNext(ignored -> log.info(
+						"[#181] WS close via evictedClose(NORMAL 1000) threadId={} connectionId={}", threadId, connectionId))
 				.then(Mono.defer(() -> session.close(CloseStatus.NORMAL)));
 
 		return Mono.firstWithSignal(messageLoop, tokenExpiry, slowConsumer, evictedClose)
-				.doFinally(ignored -> roomSessionRegistry.leave(threadId, connectionId, actor)
-						.ifPresent(generation -> collabMessageDispatcher.closeGeneration(threadId, generation)));
+				.doFinally(signal -> {
+					// [#181 계측] firstWithSignal이 어떤 시그널로 끝났는지(onComplete/onError/cancel) + 연결 수명.
+					log.info("[#181] WS session end threadId={} connectionId={} signal={} livedMs={}",
+							threadId, connectionId, signal, Duration.between(now, Instant.now()).toMillis());
+					roomSessionRegistry.leave(threadId, connectionId, actor)
+							.ifPresent(generation -> collabMessageDispatcher.closeGeneration(threadId, generation));
+				});
 	}
 
 	private Mono<WsFrame> handleInbound(WebSocketMessage message, UUID threadId, UUID userId,
