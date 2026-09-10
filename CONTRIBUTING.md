@@ -167,6 +167,8 @@ git config core.hooksPath .githooks
 - **Flyway 버전** — 전체 트리의 버전이 중복됐거나, 새·이름 변경 migration이 UTC 타임스탬프 형식이 아니다.
   새 파일은 `node scripts/flyway-migration.mjs create <lowercase_snake_case_설명>`으로 만든다. 최신 `main`을
   반영한 뒤 충돌한 아직 영구 적용 전 파일만 `node scripts/flyway-migration.mjs renumber <파일> --confirm-not-permanently-applied`로 재번호화한다.
+  `outOfOrder`는 서로 다른 낮은 버전의 나중 적용만 허용할 뿐 중복 버전을 해결하지 못하므로 켜지 않는다.
+  이관 적용 순서가 환경마다 달라질 수 있어, 충돌은 재번호화로 해소한다.
 - **자바 클래스 헤더** — 타입 선언 앞에 위 "코드 스타일" 절의 `Class Name :`/`Description :`
   헤더가 없다. 그 예시 형태로 채운다.
 

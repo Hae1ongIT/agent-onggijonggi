@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+// 전체 Flyway migration의 버전 중복과 새·이름 변경 파일의 UTC 타임스탬프 형식을 검사한다.
+// 사용: node scripts/validate-flyway-migrations.mjs --staged | --tracked | --changed-from <base-sha>
+
 import { execFileSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { basename, dirname, join, relative, sep } from 'node:path';

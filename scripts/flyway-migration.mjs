@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// UTC 밀리초 버전의 Flyway migration을 생성하고, 영구 적용 전 파일만 명시적으로 재번호화한다.
+// 사용: node scripts/flyway-migration.mjs create <lowercase_snake_case_설명>
+//       node scripts/flyway-migration.mjs renumber <파일> --confirm-not-permanently-applied
+
 import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
