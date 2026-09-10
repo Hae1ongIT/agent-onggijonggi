@@ -88,6 +88,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  flyway-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: flyway_verify
+          POSTGRES_USER: flyway_verify
+          POSTGRES_PASSWORD: flyway_verify
+        options: >-
+          --health-cmd "pg_isready -U flyway_verify -d flyway_verify"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: gradlew 실행 권한 부여
+        working-directory: backend
+        run: chmod +x gradlew
+
+      - name: 빈 PostgreSQL Flyway 전체 적용 검증
+        working-directory: backend
+        env:
+          FLYWAY_VERIFY_JDBC_URL: jdbc:postgresql://localhost:5432/flyway_verify
+          FLYWAY_VERIFY_USERNAME: flyway_verify
+          FLYWAY_VERIFY_PASSWORD: flyway_verify
+        run: ./gradlew :api:verifyFlywayMigrations --no-daemon
+
+      - name: PostgreSQL 로그
+        if: failure()
+        run: docker logs ${{ job.services.postgres.id }}
+
   # frontend — 타입 검사가 본체다.
   # #38 같은 "존재하지 않는 것을 참조" 부류는 biome 린트가 잡지 못하고 tsc가 잡는다.
   # 린트는 그다음 순서로 돌린다(형식·규칙 위반은 성격이 다른 문제라 원인 파악이 쉬워진다).

@@ -118,6 +118,7 @@ docs: 빠른 시작 누락 단계 보완
 - [ ] 관련 문서를 함께 고쳤다
 
 PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불변식·Flyway 버전과 Java 클래스 헤더를 자동 검사한다. 나머지 항목은 직접 확인한다.
+`flyway-postgres`는 빈 PostgreSQL 16에 전체 migration을 실제 적용한다. Hibernate 매핑과 SQL 제약의 의미는 별도 절차로 확인한다.
 
 승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `main`에 커밋 하나로 남는다.
 리뷰가 오래 조용하면 PR에 댓글로 깨워주면 된다.
@@ -277,8 +278,9 @@ cd backend
 .\gradlew.bat :api:bootRun
 ```
 
-빈 DB라면 **최초 1회**는 스키마를 만들도록 Flyway를 켜서 띄운다 — `bootRun` 뒤에
-`--args="--spring.flyway.enabled=true"`를 붙인다. 기본 프로파일에서는 꺼져 있다.
+빈 로컬 DB에 **최초 1회** 스키마를 만들 때만 Flyway를 켜서 띄운다 — `bootRun` 뒤에
+`--args="--spring.flyway.enabled=true"`를 붙인다. 기본 프로파일에서는 꺼져 있다. 이는 개발 DB 초기화용이며,
+PR의 전체 migration 적용 검증은 CI `flyway-postgres` job이 담당한다.
 
 테스트는 `bootRun` 자리에 `test`를 넣는다.
 
