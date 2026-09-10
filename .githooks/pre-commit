@@ -4,11 +4,11 @@
 #
 # 설치(개발자마다 1회):  git config core.hooksPath .githooks
 #
-# 판정은 scripts/validate-glossary.mjs 하나만 쓴다 — CI와 결과가 갈리지 않게.
+# 각 validator는 CI와 같은 계약을 확인한다. 훅을 바꿀 때는 CI도 함께 갱신한다.
 
 # node가 없는 환경에서 커밋 자체를 막지는 않는다. 최종 게이트는 CI다.
 if ! command -v node >/dev/null 2>&1; then
-	echo "[pre-commit] node가 없어 용어집 검사를 건너뜁니다(최종 검사는 CI에서 수행)." >&2
+	echo "[pre-commit] node가 없어 정적 검사를 건너뜁니다(최종 검사는 CI에서 수행)." >&2
 	exit 0
 fi
 
@@ -23,6 +23,14 @@ if ! node scripts/validate-invariants.mjs --staged; then
 	echo "" >&2
 	echo "[pre-commit] 커밋을 중단했습니다. 설계 불변식을 깨는 변경입니다." >&2
 	echo "             불변식 목록: scripts/validate-invariants.mjs 상단 주석" >&2
+	exit 1
+fi
+
+if ! node scripts/validate-flyway-migrations.mjs --staged; then
+	echo "" >&2
+	echo "[pre-commit] Flyway migration 버전 또는 새 파일명이 올바르지 않아 커밋을 중단했습니다." >&2
+	echo "             node scripts/flyway-migration.mjs create <설명>으로 새 파일을 만들거나," >&2
+	echo "             영구 적용 전 파일만 재번호화하십시오." >&2
 	exit 1
 fi
 
