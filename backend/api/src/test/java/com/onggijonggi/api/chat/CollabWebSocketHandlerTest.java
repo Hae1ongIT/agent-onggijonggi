@@ -517,23 +517,19 @@ class CollabWebSocketHandlerTest {
 	}
 
 	/**
-	* [#181] 방에 참가한 상태에서 토큰이 곧(2초 뒤) 만료될 때, 서버가 어떻게 닫고 클라이언트가
-	* 무엇을 받는지 본다.
+	* [#181] 방에 참가한 상태에서 토큰이 곧(2초 뒤) 만료되면, 클라이언트가 close code 4000을
+	* 받아야 한다.
 	*
-	* #62(PR #70)는 이 경로에 4000을 기대하는 통합 테스트를 뒀으나 #77(방 레지스트리 도입)에서
-	* 삭제됐고, 지금 남은 검증은 Mockito 목(session.close()가 Mono.empty())뿐이라 firstWithSignal이
-	* 이기고 나서도 messageLoop의 session.send(outbound)가 스스로 완료돼 두 번째 session.close()가
-	* 실행되는 실제 동작이 커버되지 않는다.
-	*
-	* 확인된 것: tokenExpiry가 close(4000)를 부른 직후 messageLoop도 close(NORMAL)를 불러
-	* CloseWebSocketFrame이 이중 해제되고(IllegalReferenceCountException), 종료 핸드셰이크가 깨져
-	* 클라이언트는 close code를 아예 받지 못한다(closeStatus()가 값을 내지 않음).
-	*
-	* 아래 assertion은 그 버그가 살아 있는 동안 통과한다. 수정되면 클라이언트가 4000을 받아야 하므로
-	* 이 테스트를 뒤집는다(주석의 기대값 참고).
+	* 회귀 배경: #62(PR #70)에 이 경로의 통합 테스트가 있었으나 #77(방 레지스트리 도입)에서
+	* 삭제됐고, 이후 남은 검증은 Mockito 목(session.close()=Mono.empty())뿐이었다. 실제로는
+	* 종료 경로마다 session.close()를 부르고 그게 살아 있는 session.send(outbound)와 같은 채널에서
+	* 경합해 CloseWebSocketFrame이 이중 해제되고(refCnt: 0, decrement: 1) 클라이언트가 close code를
+	* 못 받았다. 이제 모든 종료 사유는 closeReason 한 곳으로 모이고, session.send(outbound)가
+	* 완료된 뒤 단일 지점에서 그 사유로 한 번만 닫는다. session.receive()는 outbound와 분리해
+	* 독립 구독하므로 outbound가 끊겨도 채널이 온전하다.
 	*/
 	@Test
-	void tokenExpiryAndMessageLoopBothCloseTheSessionCorruptingTheCloseCode() {
+	void deliversCode4000WhenTokenExpiresWhileConnected() {
 		UUID threadId = rooms.openRoom("expiry-soon-user");
 		String token = TestJwtSupport.signedJwtExpiringAt("expiry-soon-user", List.of("USER"),
 				Instant.now().plusSeconds(2));
@@ -541,12 +537,12 @@ class CollabWebSocketHandlerTest {
 
 		System.out.printf("[#181] token exp +2s -> client close code = %s%n",
 				observed == null ? "NONE(null)" : observed.getCode() + " " + observed.getReason());
-		// 버그가 살아 있는 현재: 이중 close로 종료 핸드셰이크가 깨져 클라이언트가 아무 코드도 못 받는다.
-		// 수정 후 기대: assertThat(observed).isNotNull(); assertThat(observed.getCode()).isEqualTo(4000);
 		assertThat(observed)
-				.as("이중 close 버그가 살아 있으면 클라이언트는 close code를 못 받는다(#181). "
-						+ "수정되면 4000이어야 하므로 이 기대를 뒤집는다")
-				.isNull();
+				.as("토큰 만료 강제 종료 시 클라이언트가 close code를 받아야 한다(이중 close면 못 받음)")
+				.isNotNull();
+		assertThat(observed.getCode())
+				.as("토큰 만료 강제 종료는 4000(#62)")
+				.isEqualTo(4000);
 	}
 
 	/**
