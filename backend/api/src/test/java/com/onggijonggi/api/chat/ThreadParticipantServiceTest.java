@@ -2,12 +2,14 @@ package com.onggijonggi.api.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
+import com.onggijonggi.api.auth.keycloak.KeycloakUserSummary;
 import com.onggijonggi.common.chat.domain.ThrInv;
 import com.onggijonggi.common.chat.domain.ThrInvStatus;
 import com.onggijonggi.common.chat.domain.ThrMbr;
@@ -19,6 +21,7 @@ import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
 import com.onggijonggi.common.user.AppUser;
 import com.onggijonggi.common.user.AppUserRepository;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -290,6 +293,7 @@ class ThreadParticipantServiceTest {
 		ThrInv pending = new ThrInv(threadId, "late-sub", actorUserId);
 		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "late-sub", ThrInvStatus.PENDING))
 				.thenReturn(Optional.empty(), Optional.of(pending));
+		when(keycloakAdminClient.displayName("late-sub")).thenReturn(Mono.just(Optional.of("Late")));
 
 		StepVerifier.create(service.invite(threadId, actorUserId, "late-sub")).verifyComplete();
 
@@ -310,11 +314,215 @@ class ThreadParticipantServiceTest {
 		when(keycloakAdminClient.exists("never-sub")).thenReturn(Mono.just(true));
 		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "never-sub", ThrInvStatus.PENDING))
 				.thenReturn(Optional.empty());
+		when(keycloakAdminClient.displayName("never-sub")).thenReturn(Mono.just(Optional.of("Never")));
 
 		StepVerifier.create(service.invite(threadId, actorUserId, "never-sub")).verifyComplete();
 
 		verify(thrInvRepository).save(any(ThrInv.class));
 		verify(invitationAcceptanceService, never()).acceptOneBlocking(any(), any());
+	}
+
+	/**
+	* 고를 수 없는 항목을 보여주고 눌렀을 때 실패시키는 것보다, 아예 빼고 내려주는 편이 낫다.
+	* 이미 참가 중인 사람과 이미 부른 사람 둘 다 대상이다(이슈 #172).
+	*/
+	@Test
+	void candidateSearchDropsPeopleAlreadyInTheRoomOrAlreadyInvited() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		UUID memberUserId = UUID.randomUUID();
+		AppUser member = new AppUser("member-sub");
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrMbrRepository.findByThrIdAndStatus(threadId, ThrMbrStatus.ACTIVE))
+				.thenReturn(List.of(new ThrMbr(threadId, memberUserId, ThrMbrRole.MEMBER, actorUserId)));
+		when(appUserRepository.findAllById(List.of(memberUserId))).thenReturn(List.of(member));
+		when(thrInvRepository.findByThrIdAndStatus(threadId, ThrInvStatus.PENDING))
+				.thenReturn(List.of(new ThrInv(threadId, "invited-sub", actorUserId)));
+		when(keycloakAdminClient.search("kim", 20)).thenReturn(Mono.just(List.of(
+				new KeycloakUserSummary("member-sub", "김멤버"),
+				new KeycloakUserSummary("invited-sub", "김초대"),
+				new KeycloakUserSummary("fresh-sub", "김신규"))));
+
+		StepVerifier.create(service.searchCandidates(threadId, actorUserId, "kim"))
+				.assertNext(candidates -> assertThat(candidates)
+						.containsExactly(new InviteCandidate("fresh-sub", "김신규")))
+				.verifyComplete();
+	}
+
+	/** 검색 인가는 초대와 같은 자리다 — 초대할 수 없는 사람에게 계정 목록을 열어 주지 않는다. */
+	@Test
+	void candidateSearchRejectsANonOwnerBeforeCallingKeycloak() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.MEMBER, actorUserId)));
+
+		StepVerifier.create(service.searchCandidates(threadId, actorUserId, "kim"))
+				.verifyErrorSatisfies(error -> assertThat(error)
+						.isInstanceOf(ResponseStatusException.class)
+						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
+						.isEqualTo(HttpStatus.FORBIDDEN));
+		verify(keycloakAdminClient, never()).search(any(), anyInt());
+	}
+
+	/** 취소는 행을 지우지 않고 REVOKED로 남긴다 — 누가 누구를 불렀었는지가 남아야 한다(#127과 같은 이유). */
+	@Test
+	void revokeMarksThePendingInvitationRevokedWithoutDeletingIt() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		ThrInv invitation = new ThrInv(threadId, "invited-sub", actorUserId);
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "invited-sub", ThrInvStatus.PENDING))
+				.thenReturn(Optional.of(invitation));
+		when(keycloakAdminClient.displayName("invited-sub")).thenReturn(Mono.just(Optional.empty()));
+
+		StepVerifier.create(service.revokeInvitation(threadId, actorUserId, "invited-sub")).verifyComplete();
+
+		assertThat(invitation.getStatus()).isEqualTo(ThrInvStatus.REVOKED);
+		assertThat(invitation.getEndRsn()).isEqualTo("OWNER_REVOKED");
+		verify(thrInvRepository).save(invitation);
+		verify(thrInvRepository, never()).delete(any());
+	}
+
+	/** 대기 초대가 없으면 404다 — 이미 거둬졌거나 애초에 없던 초대를 구분하지 않는다. */
+	@Test
+	void revokeFailsWithNotFoundWhenThereIsNoPendingInvitation() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "ghost-sub", ThrInvStatus.PENDING))
+				.thenReturn(Optional.empty());
+
+		StepVerifier.create(service.revokeInvitation(threadId, actorUserId, "ghost-sub"))
+				.verifyErrorSatisfies(error -> assertThat(error)
+						.isInstanceOf(ResponseStatusException.class)
+						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
+						.isEqualTo(HttpStatus.NOT_FOUND));
+	}
+
+	/** 명단은 참가자 아래에 대기 초대를 얹는다 — 초대해도 아무것도 안 보이던 것을 없앤다(#172). */
+	@Test
+	void listPutsPendingInvitationsAfterTheJoinedParticipants() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser actor = new AppUser("owner-sub");
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrMbrRepository.findByThrIdAndStatus(threadId, ThrMbrStatus.ACTIVE))
+				.thenReturn(List.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(appUserRepository.findAllById(List.of(actorUserId))).thenReturn(List.of(actor));
+		when(thrInvRepository.findByThrIdAndStatus(threadId, ThrInvStatus.PENDING))
+				.thenReturn(List.of(new ThrInv(threadId, "waiting-sub", actorUserId)));
+
+		StepVerifier.create(service.list(threadId, actorUserId))
+				.assertNext(participants -> {
+					assertThat(participants).hasSize(2);
+					assertThat(participants.get(0).pending()).isFalse();
+					assertThat(participants.get(1).pending()).isTrue();
+					assertThat(participants.get(1).subject()).isEqualTo("waiting-sub");
+					// 대상은 아직 app_user 행이 없어 self가 될 수 없다.
+					assertThat(participants.get(1).self()).isFalse();
+				})
+				.verifyComplete();
+	}
+
+	/** 대기 초대도 명단을 바꾸므로 통지한다. 참가가 아니라 INVITE_PENDING이다(이슈 #172·#129). */
+	@Test
+	void pendingInvitationNotifiesTheRoomWithItsOwnAction() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("waiting-sub")).thenReturn(Optional.empty());
+		when(keycloakAdminClient.exists("waiting-sub")).thenReturn(Mono.just(true));
+		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "waiting-sub", ThrInvStatus.PENDING))
+				.thenReturn(Optional.empty());
+		when(keycloakAdminClient.displayName("waiting-sub"))
+				.thenReturn(Mono.just(Optional.of("아직 로그인 전")));
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "waiting-sub")).verifyComplete();
+
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.INVITE_PENDING,
+						"waiting-sub", "아직 로그인 전")));
+	}
+
+	/** 이미 같은 대기 초대가 있으면 명단이 바뀌지 않는다 — joinNow의 멱등 생략과 같은 결이다. */
+	@Test
+	void repeatedPendingInvitationDoesNotNotify() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("waiting-sub")).thenReturn(Optional.empty());
+		when(keycloakAdminClient.exists("waiting-sub")).thenReturn(Mono.just(true));
+		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "waiting-sub", ThrInvStatus.PENDING))
+				.thenReturn(Optional.of(new ThrInv(threadId, "waiting-sub", actorUserId)));
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "waiting-sub")).verifyComplete();
+
+		verify(roomSessionRegistry, never()).notifyIfListening(any(), any());
+	}
+
+	/**
+	* 초대를 남기는 사이에 대상이 첫 로그인을 마쳐 전환된 경우다. 그 사람은 이제 실제 참가자이므로
+	* 대기가 아니라 INVITED로 알린다.
+	*/
+	@Test
+	void notifiesInvitedWhenThePendingRowConvertedImmediately() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		AppUser invitee = new AppUser("late-sub");
+		ThrInv pending = new ThrInv(threadId, "late-sub", actorUserId);
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE)).thenReturn(true);
+		when(appUserRepository.findByKeycloakSubj("late-sub"))
+				.thenReturn(Optional.empty(), Optional.of(invitee));
+		when(keycloakAdminClient.exists("late-sub")).thenReturn(Mono.just(true));
+		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "late-sub", ThrInvStatus.PENDING))
+				.thenReturn(Optional.empty(), Optional.of(pending));
+		when(keycloakAdminClient.displayName("late-sub")).thenReturn(Mono.just(Optional.of("Late")));
+
+		StepVerifier.create(service.invite(threadId, actorUserId, "late-sub")).verifyComplete();
+
+		verify(invitationAcceptanceService).acceptOneBlocking(pending.getId(), invitee.getId());
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.INVITED, "late-sub",
+						"Late")));
+	}
+
+	/** 초대 취소도 명단을 바꾼다. 참가한 적이 없으므로 REMOVED가 아니라 INVITE_REVOKED다. */
+	@Test
+	void revokeNotifiesTheRoomWithItsOwnAction() {
+		UUID threadId = UUID.randomUUID();
+		UUID actorUserId = UUID.randomUUID();
+		ThrInv invitation = new ThrInv(threadId, "invited-sub", actorUserId);
+
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrInvRepository.findByThrIdAndSubjAndStatus(threadId, "invited-sub", ThrInvStatus.PENDING))
+				.thenReturn(Optional.of(invitation));
+		when(keycloakAdminClient.displayName("invited-sub")).thenReturn(Mono.just(Optional.of("초대된 사람")));
+
+		StepVerifier.create(service.revokeInvitation(threadId, actorUserId, "invited-sub")).verifyComplete();
+
+		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
+				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.INVITE_REVOKED,
+						"invited-sub", "초대된 사람")));
 	}
 
 }
