@@ -5,9 +5,9 @@
  설 명 : 협업방 참여자 관리 UI(이슈 #23). 방 헤더의 "참여자" 버튼으로 열리는 Sheet 하나에
  조회·초대·제거·소유권 위임을 전부 담는다. #20의 참여자 관리 API(PR #136)를 그대로 소비한다.
 
- Sheet를 열 때마다, 그리고 초대·제거·위임·나가기가 성공할 때마다 매번 목록을 다시 불러온다.
- #129(참여자 변경 실시간 통지)가 아직 없어 Sheet가 닫혀 있는 동안 남이 만든 변경을 알 방법이
- 재조회뿐이기 때문이다 — #129가 끝나면 이 폴링은 걷어내고 그 통지를 받아 갱신하도록 바꿔야 한다.
+ Sheet를 열 때 최초 목록을 읽고, 열린 동안 #129의 `participant.changed`를 받으면 최신 목록을
+ 다시 읽는다(#173). 액션 성공 뒤 직접 재조회하지 않는다. 늦게 끝난 이전 요청은 최신 요청의
+ 결과를 덮어쓰지 못한다.
 
  나가기·제거·위임은 전부 같은 AlertDialog(app-sidebar.tsx의 세션 삭제 확인과 같은 컴포넌트)로
  확인을 거친다. 위임도 되돌리려면 상대가 다시 위임해줘야 하는 무거운 동작이라 같은 절차를 둔다.
@@ -22,7 +22,7 @@
  같은 확정적 사실이기 때문이다.
  *********************************************************/
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Users } from 'lucide-react';
 import { toast } from 'sonner';
@@ -59,6 +59,7 @@ import {
   type ThreadParticipant,
 } from '@/lib/api/collab';
 import { resolveChatError } from '@/lib/api/errors';
+import { createParticipantRefreshGate } from './participant-refresh';
 
 const ROLE_LABEL: Record<ThreadParticipant['role'], string> = {
   OWNER: '소유자',
@@ -96,17 +97,21 @@ export function ParticipantsSheet({
   const [inviteQuery, setInviteQuery] = useState('');
   const [candidates, setCandidates] = useState<InviteCandidate[]>([]);
   const [searching, setSearching] = useState(false);
+  const requestGate = useRef(createParticipantRefreshGate());
 
   const callerRole = participants.find((p) => p.self)?.role;
 
-  async function load() {
+  const load = useCallback(async () => {
+    const requestId = requestGate.current.begin();
     setStatus('loading');
     setErrorMessage(null);
     try {
       const list = await fetchThreadParticipants(threadId);
+      if (!requestGate.current.isCurrent(requestId)) return;
       setParticipants(list);
       setStatus('loaded');
     } catch (err) {
+      if (!requestGate.current.isCurrent(requestId)) return;
       const { code, message } = resolveChatError(err as Error);
       if (code === 'NOT_FOUND') {
         // 더 이상 이 방의 참가자가 아니다 — 남이 먼저 제거했든 내가 방금 나갔든 처리는 같다.
@@ -118,7 +123,7 @@ export function ParticipantsSheet({
       setStatus('error');
       setErrorMessage(message);
     }
-  }
+  }, [router, threadId]);
 
   /**
    * 고른 사람을 초대한다. subject는 검색 결과가 들고 있던 값을 그대로 되돌려 주는 것이라
@@ -131,7 +136,6 @@ export function ParticipantsSheet({
       await inviteParticipant(threadId, candidate.subject);
       setInviteQuery('');
       setCandidates([]);
-      await load();
     } catch (err) {
       toast.error(resolveChatError(err as Error).message);
     } finally {
@@ -145,7 +149,6 @@ export function ParticipantsSheet({
     setBusy(true);
     try {
       await revokeInvitation(threadId, target.subject);
-      await load();
     } catch (err) {
       toast.error(resolveChatError(err as Error).message);
     } finally {
@@ -153,12 +156,15 @@ export function ParticipantsSheet({
     }
   }
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshSignal이 이 effect의
-  // 트리거다 — load는 매 렌더 새로 만들어져 deps에 넣으면 무한 재조회가 된다.
+  // 열 때의 최초 조회와 변경 프레임 뒤의 갱신을 한 경로로 둔다. 닫혀 있는 동안에는 프레임을
+  // 소비하지 않고, 늦게 끝난 이전 요청도 요청 세대 게이트로 무시한다.
   useEffect(() => {
-    if (refreshSignal === 0 || !open) return;
+    if (!open) {
+      requestGate.current.invalidate();
+      return;
+    }
     void load();
-  }, [refreshSignal, open]);
+  }, [load, open, refreshSignal]);
 
   /**
    * 검색어가 멎으면 후보를 불러온다. 타이핑마다 부르면 Keycloak Admin API를 글자 수만큼
@@ -214,7 +220,6 @@ export function ParticipantsSheet({
       } else {
         await transferOwnership(threadId, action.target.subject);
       }
-      await load();
     } catch (err) {
       const { code, message } = resolveChatError(err as Error);
       // OWNER 본인이 위임 없이 나가려 한 409만 예외 — 경합을 전제한 공용 문구가 틀린 조언이 된다.
@@ -238,7 +243,7 @@ export function ParticipantsSheet({
         open={open}
         onOpenChange={(next) => {
           setOpen(next);
-          if (next) void load();
+          if (!next) requestGate.current.invalidate();
         }}
       >
         <SheetTrigger asChild>
