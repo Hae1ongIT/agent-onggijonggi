@@ -117,7 +117,7 @@ docs: 빠른 시작 누락 단계 보완
 - [ ] 동작이 바뀌었다면 테스트를 붙였다 (어렵다면 그 이유를 PR에 적는다)
 - [ ] 관련 문서를 함께 고쳤다
 
-PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불변식과 Java 클래스 헤더를 자동 검사한다. 나머지 항목은 직접 확인한다.
+PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불변식·Flyway 버전과 Java 클래스 헤더를 자동 검사한다. 나머지 항목은 직접 확인한다.
 
 승인 1명이면 메인테이너가 **squash**로 머지한다 — PR 하나가 `main`에 커밋 하나로 남는다.
 리뷰가 오래 조용하면 PR에 댓글로 깨워주면 된다.
@@ -157,13 +157,16 @@ PR을 열면 `static-checks`가 마이그레이션 SQL의 용어집·설계 불�
 git config core.hooksPath .githooks
 ```
 
-커밋될 내용을 세 갈래로 검사한다 — 마이그레이션 SQL의 DB 식별자 이름과 설계 불변식,
+커밋될 내용을 네 갈래로 검사한다 — 마이그레이션 SQL의 DB 식별자 이름·설계 불변식·Flyway 버전,
 그리고 자바 파일의 클래스 헤더. 걸렸다면 푸는 방법이 다르다.
 
 - **용어집** — 아직 사전에 없는 단어를 썼다. [`scripts/glossary/words.md`](scripts/glossary/words.md)에
   단어를 등재하고 `node scripts/build-glossary.mjs`로 사전을 다시 만든 뒤 커밋한다.
 - **설계 불변식** — 설계 계약을 깨는 변경이다. 등재로는 풀리지 않으니 설계를 바꿔야 한다. 무엇을
   왜 막는지는 `scripts/validate-invariants.mjs` 상단 주석에 적혀 있다.
+- **Flyway 버전** — 전체 트리의 버전이 중복됐거나, 새·이름 변경 migration이 UTC 타임스탬프 형식이 아니다.
+  새 파일은 `node scripts/flyway-migration.mjs create <lowercase_snake_case_설명>`으로 만든다. 최신 `main`을
+  반영한 뒤 충돌한 아직 영구 적용 전 파일만 `node scripts/flyway-migration.mjs renumber <파일> --confirm-not-permanently-applied`로 재번호화한다.
 - **자바 클래스 헤더** — 타입 선언 앞에 위 "코드 스타일" 절의 `Class Name :`/`Description :`
   헤더가 없다. 그 예시 형태로 채운다.
 
