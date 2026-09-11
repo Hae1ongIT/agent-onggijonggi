@@ -5,8 +5,6 @@
 
 import { motion } from 'framer-motion';
 
-import { BotIcon, MessageIcon } from './icons';
-
 export const Overview = () => {
   return (
     <motion.div
@@ -18,10 +16,17 @@ export const Overview = () => {
       transition={{ delay: 0.5 }}
     >
       <div className="rounded-xl p-6 flex flex-col gap-8 leading-relaxed text-center max-w-xl">
-        <p className="flex flex-row justify-center gap-4 items-center">
-          <BotIcon />
-          <span>+</span>
-          <MessageIcon size={32} />
+        <p className="flex flex-row justify-center">
+          <img
+            src="/brand/logos/onggijonggi-logo-vertical.svg"
+            alt=""
+            className="block dark:hidden h-24 w-auto"
+          />
+          <img
+            src="/brand/logos/onggijonggi-logo-vertical-dark.svg"
+            alt=""
+            className="hidden dark:block h-24 w-auto"
+          />
         </p>
         <p>옹기종기는 LiteLLM 게이트웨이로 여러 모델에 붙는 AI 챗봇입니다.</p>
         <p>
