@@ -1,5 +1,10 @@
 # onggijonggi-chat
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="frontend/public/brand/logos/onggijonggi-logo-horizontal-dark.svg">
+  <img src="frontend/public/brand/logos/onggijonggi-logo-horizontal.svg" alt="옹기종기" width="320">
+</picture>
+
 **사람과 AI가 한 대화에 옹기종기.** 옹기종기는 비개발 직군을 포함한 여러 구성원과 여러 AI 에이전트가 하나의 대화 맥락을 공유하며 협업할 수 있는 환경을 지향하는 오픈소스 사내 업무용 LLM 에이전트 솔루션이다.
 
 한 구성원이 업무 질문을 올리면 권한이 있는 동료가 정보와 판단을 보태고, 필요한 AI 에이전트가 맡은 역할에 맞게 기여한다. 뒤이어 참여하는 사람과 AI는 앞서 오간 설명과 결정을 같은 대화에서 확인하고 그 맥락을 이어받는다. 조직별 데이터와 권한의 경계는 그대로 유지한다.

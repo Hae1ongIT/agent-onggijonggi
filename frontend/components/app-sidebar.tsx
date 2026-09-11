@@ -160,11 +160,19 @@ export function AppSidebar({
               onClick={() => {
                 setOpenMobile(false);
               }}
-              className="flex flex-row gap-3 items-center"
+              aria-label="onggijonggi-chat 홈"
+              className="flex flex-row gap-3 items-center px-2 py-1 hover:bg-muted rounded-md cursor-pointer"
             >
-              <span className="text-lg font-semibold px-2 hover:bg-muted rounded-md cursor-pointer">
-                onggijonggi-chat
-              </span>
+              <img
+                src="/brand/logos/onggijonggi-logo-horizontal.svg"
+                alt=""
+                className="block dark:hidden h-7 w-auto"
+              />
+              <img
+                src="/brand/logos/onggijonggi-logo-horizontal-dark.svg"
+                alt=""
+                className="hidden dark:block h-7 w-auto"
+              />
             </Link>
             <Tooltip>
               <TooltipTrigger asChild>
