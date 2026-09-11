@@ -3,6 +3,7 @@ package com.onggijonggi.api.chat;
 import com.onggijonggi.common.chat.domain.ThrMbrStatus;
 import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
 import java.net.URI;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -514,6 +515,77 @@ class CollabWebSocketHandlerTest {
 		}).block(WsTestTimeouts.BLOCK);
 
 		assertThat(closeStatus.get().getCode()).isEqualTo(1000);
+	}
+
+	/**
+	* [#181] 방에 참가한 상태에서 토큰이 곧(2초 뒤) 만료되면, 클라이언트가 close code 4000을
+	* 받아야 한다.
+	*
+	* 회귀 배경: #62(PR #70)에 이 경로의 통합 테스트가 있었으나 #77(방 레지스트리 도입)에서
+	* 삭제됐고, 이후 남은 검증은 Mockito 목(session.close()=Mono.empty())뿐이었다. 실제로는
+	* 종료 경로마다 session.close()를 부르고 그게 살아 있는 session.send(outbound)와 같은 채널에서
+	* 경합해 CloseWebSocketFrame이 이중 해제되고(refCnt: 0, decrement: 1) 클라이언트가 close code를
+	* 못 받았다. 이제 모든 종료 사유는 closeReason 한 곳으로 모이고, session.send(outbound)가
+	* 완료된 뒤 단일 지점에서 그 사유로 한 번만 닫는다. session.receive()는 outbound와 분리해
+	* 독립 구독하므로 outbound가 끊겨도 채널이 온전하다.
+	*/
+	@Test
+	void deliversCode4000WhenTokenExpiresWhileConnected() {
+		UUID threadId = rooms.openRoom("expiry-soon-user");
+		String token = TestJwtSupport.signedJwtExpiringAt("expiry-soon-user", List.of("USER"),
+				Instant.now().plusSeconds(2));
+		CloseStatus observed = observeCloseCode(threadId, token);
+
+		System.out.printf("[#181] token exp +2s -> client close code = %s%n",
+				observed == null ? "NONE(null)" : observed.getCode() + " " + observed.getReason());
+		assertThat(observed)
+				.as("토큰 만료 강제 종료 시 클라이언트가 close code를 받아야 한다(이중 close면 못 받음)")
+				.isNotNull();
+		assertThat(observed.getCode())
+				.as("토큰 만료 강제 종료는 4000(#62)")
+				.isEqualTo(4000);
+	}
+
+	/**
+	* [#181] 이미 만료된 토큰은 만료 폭이 작아도(5초) WS 핸드셰이크에서 401로 거부된다 —
+	* JwtTimestampValidator 기본 clock-skew(60초)가 무색하게 사실상 유예가 없다. 따라서 #181의
+	* 재연결 루프는 "이미 만료된 토큰이 방에 들어온다"가 아니라 "곧 만료될 토큰이 들어온 뒤 즉시
+	* 끊긴다"에서 온다.
+	*/
+	@Test
+	void alreadyExpiredTokensAreRejectedAtHandshakeRegardlessOfSkew() {
+		UUID threadId = rooms.openRoom("expired-user");
+		for (int secondsExpired : new int[] {5, 20, 45, 90}) {
+			String token = TestJwtSupport.signedJwtExpiringAt("expired-user", List.of("USER"),
+					Instant.now().minusSeconds(secondsExpired));
+			assertThatThrownBy(() -> observeCloseCode(threadId, token))
+					.as("만료 %d초 토큰은 핸드셰이크에서 거부돼야 한다", secondsExpired)
+					.isInstanceOf(WebSocketClientHandshakeException.class)
+					.hasMessageContaining("401");
+		}
+	}
+
+	/** receive() demand를 걸어 서버 프레임(참여자 스냅샷 등)을 소비하면서 closeStatus()로 종료 코드를
+	 * 잡는다 — #62 주석대로 receive()를 함께 구독하지 않으면 close 프레임이 도달하지 않는다. 서버가
+	 * 먼저 닫는 시나리오에선 closeStatus()가 값을 못 받을 수 있어(이 파일 evict 테스트 주석 참고)
+	 * null 가능성을 호출부가 감안한다. */
+	private CloseStatus observeCloseCode(UUID threadId, String token) {
+		AtomicReference<CloseStatus> closeStatus = new AtomicReference<>();
+		ReactorNettyWebSocketClient client = new ReactorNettyWebSocketClient(
+				HttpClient.create(ConnectionProvider.newConnection()));
+		client.execute(wsUri(threadId), allowedHeaders(), new WebSocketHandler() {
+			@Override
+			public List<String> getSubProtocols() {
+				return List.of("access_token", token);
+			}
+
+			@Override
+			public Mono<Void> handle(WebSocketSession session) {
+				return Mono.when(session.receive().then(),
+						session.closeStatus().doOnNext(closeStatus::set).then());
+			}
+		}).block(WsTestTimeouts.BLOCK);
+		return closeStatus.get();
 	}
 
 	@Test

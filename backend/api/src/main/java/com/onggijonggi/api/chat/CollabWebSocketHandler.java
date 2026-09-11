@@ -49,6 +49,11 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 	 * 실제로 네트워크에 나가는 것보다 먼저 도착할 여지가 있다. */
 	private static final Duration EVICTED_FRAME_FLUSH_GRACE_PERIOD = Duration.ofMillis(200);
 
+	/** 종료 사유가 정해진 뒤 session.send(outbound)가 스스로 완료돼 정상 close로 이어질 시간(이슈 #181).
+	 * 이 안에 안 끝나면(느린 소비자처럼 backpressure로 send가 막힌 경우) 직접 close로 넘어간다 —
+	 * 그 경로의 close 프레임은 degraded일 수 있으나 그 상황은 클라이언트가 읽지 않는 상태다. */
+	private static final Duration CLOSE_DRAIN_GRACE_PERIOD = Duration.ofMillis(500);
+
 	private static final Set<String> SERVER_ONLY_TYPES = Set.of("chat.answer", "presence.join",
 			"presence.leave", "presence.snapshot", "error", "system.notice");
 
@@ -146,33 +151,51 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 	private Mono<Void> handleRoomSession(WebSocketSession session, UUID threadId, UUID userId,
 			PresenceParticipant actor, Instant tokenExpiresAt) {
 		UUID connectionId = UUID.randomUUID();
-		Sinks.One<Void> inboundDone = Sinks.one();
+		// 종료 사유 하나로 수렴한다 — 클라이언트가 먼저 닫든(peer close), 서버가 토큰 만료·느린
+		// 소비자·evict로 끊든 모두 여기에 CloseStatus를 넣는다. outbound(방 브로드캐스트)는 이걸로
+		// 끊기고, 실제 session.close()는 send(outbound)가 완료된 뒤 단 한 곳(lifecycle)에서 이 사유로
+		// 불린다. session.close()가 살아 있는 session.send()와 같은 채널에서 경합하면
+		// CloseWebSocketFrame이 이중 해제돼(refCnt: 0, decrement: 1) 종료 핸드셰이크가 깨지고
+		// 클라이언트가 close code를 받지 못한다(이슈 #181). 종료 경로마다 session.close()를 부르던
+		// 예전 구조(messageLoop·tokenExpiry·slowConsumer·evictedClose 각자 close)가 그 경합을 냈다.
+		Sinks.One<CloseStatus> closeReason = Sinks.one();
 		Sinks.One<Void> outboundOverflow = Sinks.one();
 		RoomSessionRegistry.RoomMembership membership = roomSessionRegistry.join(threadId, connectionId, actor);
+
+		// [#181 계측] 핸드셰이크 통과 시점에 토큰이 exp 대비 몇 초 남았는지 — 근-만료 토큰 무한
+		// 재발급(이슈 #181) 원인 규명용, 로그 레벨 debug. 실서버 배포 후 원인이 확정되면 제거한다
+		// (진행 상황은 이슈 #181 코멘트에 남긴다 — docs/는 로컬 전용이라 팀 공유가 안 된다).
+		Instant now = Instant.now();
+		long skewSeconds = tokenExpiresAt == null ? Long.MIN_VALUE
+				: Duration.between(now, tokenExpiresAt).toSeconds();
+		log.debug("[#181] WS admit threadId={} connectionId={} sub={} tokenExp={} now={} skewSeconds={}",
+				threadId, connectionId, actor.subject(), tokenExpiresAt, now, skewSeconds);
 
 		// 참여자 스냅샷(#26)은 방송이 아니라 이 연결의 값이라, 방 버퍼 밖에서 맨 앞에 붙인다 —
 		// 느린 소비자용 버퍼 한 칸을 명단이 차지할 이유가 없다.
 		Flux<WsFrame> roomFrames = bufferForConnection(membership.frames(), outboundOverflow)
 				.startWith(membership.snapshot());
 
-		Flux<WsFrame> inboundResponses = session.receive()
+		// session.receive()는 outbound와 분리해 독립 구독한다 — outbound를 사유로 끊을 때
+		// session.receive()가 함께 취소되면 Reactor Netty 채널이 즉시 무너져, 뒤이은
+		// session.close(status)의 close 프레임이 코드 없이 나가거나(클라이언트 1005) 아예 못
+		// 나간다(이슈 #181). 인바운드 처리 결과 프레임은 sink로 옮겨 outbound에 실어 보낸다.
+		Sinks.Many<WsFrame> inboundResponses = Sinks.many().unicast().onBackpressureBuffer();
+		Mono<Void> inboundPump = session.receive()
 				.concatMap(message -> handleInbound(message, threadId, userId, actor, membership.generation()))
-				.doFinally(ignored -> inboundDone.tryEmitEmpty());
+				.doOnNext(inboundResponses::tryEmitNext)
+				// 클라이언트/피어가 먼저 닫으면 receive()가 끝난다 — 정상 종료(1000)로 수렴시킨다.
+				.doFinally(ignored -> {
+					closeReason.tryEmitValue(CloseStatus.NORMAL);
+					inboundResponses.tryEmitComplete();
+				})
+				.then();
 
-		// evict(이슈 #135)로 강제 종료될 때도 FORBIDDEN 프레임을 보낸 뒤 닫는다 — 연결 거부
-		// 시점(rejectRoomAccess)과 같은 사유 전달 방식이다. 별도 Mono로 session.send()를 한 번 더
-		// 부르지 않고 기존 outbound 스트림에 이어 붙이는 이유는, WebSocketSession.send()는 세션당
-		// 한 번만 구독할 수 있어(Reactor Netty 제약) messageLoop의 send(outbound)와 동시에 두 번째
-		// send()를 부르면 두 스트림이 같은 커넥션에 충돌하기 때문이다.
-		//
-		// evictedFrame을 내보내려고 roomFrames·inboundResponses를 takeUntilOther로 즉시 취소하는
-		// 방식을 먼저 시도했으나, 그러면 session.receive()(inboundResponses가 감싼 것)도 함께
-		// 취소된다 — 그 취소가 Reactor Netty 채널 자체를 즉시 끊어버려, evictedFrame이 실제로
-		// flush되기 전에 연결이 끊기는 경합이 실제로 재현됐다(클라이언트 closeStatus가 정상 종료
-		// 1000이 아니라 비정상 종료 1005로 관측됨). 그래서 evictionNotice를 merge의 세 번째
-		// 소스로 그냥 얹어 다른 프레임과 똑같이 자연스럽게 흘려보내고(취소 없음), 실제 종료는
-		// 별도 Mono(evictedClose)가 맡는다 — evictionNotice가 끝난 뒤 짧게 기다려 session.send()가
-		// 그 프레임을 flush할 시간을 준 다음에야 close를 부른다.
+		// evict(이슈 #135)로 강제 종료될 때도 FORBIDDEN 프레임을 보낸 뒤 닫는다. 별도 Mono로
+		// session.send()를 한 번 더 부르지 않고 기존 outbound 스트림에 이어 붙이는 이유는,
+		// WebSocketSession.send()는 세션당 한 번만 구독할 수 있어(Reactor Netty 제약) 두 번째
+		// send()가 같은 커넥션에서 충돌하기 때문이다. evict 트리거는 그 프레임이 flush될 시간을
+		// 준 뒤에야 closeReason에 사유를 넣는다(EVICTED_FRAME_FLUSH_GRACE_PERIOD).
 		ErrorFrame evictedFrame = new ErrorFrame(threadId, "FORBIDDEN", "참여자 명단에서 제외되어 연결이 종료됩니다.",
 				newTraceId());
 		Flux<WsFrame> evictionNotice = membership.kicked()
@@ -181,30 +204,56 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				.thenMany(Flux.<WsFrame>just(evictedFrame))
 				.cache();
 
-		Flux<WebSocketMessage> outbound = Flux.merge(roomFrames, inboundResponses, evictionNotice)
-				.takeUntilOther(inboundDone.asMono())
+		// outbound는 방 브로드캐스트·인바운드 응답·evict 통보로만 구성한다. session.receive()는
+		// 여기 없다 — closeReason으로 이 flux가 끊겨도 인바운드 구독은 살아 있어 채널이 온전하다.
+		Flux<WebSocketMessage> outbound = Flux.merge(roomFrames, inboundResponses.asFlux(), evictionNotice)
+				.takeUntilOther(closeReason.asMono())
 				.map(frame -> session.textMessage(serialize(frame)));
 
-		Mono<Void> messageLoop = session.send(outbound).then(session.close(CloseStatus.NORMAL));
+		// 서버발 종료 트리거 — session.close()는 부르지 않고 closeReason에 사유만 넣는다.
 		Mono<Void> tokenExpiry = tokenExpiresAt == null
 				? Mono.never()
-				: Mono.delay(durationUntil(tokenExpiresAt)).then(session.close(TOKEN_EXPIRED));
+				: Mono.delay(durationUntil(tokenExpiresAt))
+						.doOnNext(ignored -> closeReason.tryEmitValue(TOKEN_EXPIRED))
+						.then();
 		Mono<Void> slowConsumer = outboundOverflow.asMono()
-				.doOnSuccess(ignored -> log.warn(
-						"Closing slow WebSocket consumer threadId={} connectionId={}", threadId, connectionId))
-				.then(session.close(SLOW_CONSUMER));
-		// session.close(...)를 여기 직접 쓰면 자바가 .then()의 인자를 메서드 호출 시점에 바로
-		// 평가해, evict가 일어나기도 전에(이 메서드가 실행되는 즉시) 닫아버린다 — 마치
-		// ThreadParticipantService.notifyParticipantChanged의 Mono.defer 주석이 경고하는 것과
-		// 같은 함정이다. Mono.defer로 감싸 evictedClose가 실제로 구독될 때(즉 evict 이후)에만
-		// close()를 부르게 한다.
-		Mono<Void> evictedClose = evictionNotice.then()
+				.doOnSuccess(ignored -> {
+					log.warn("Closing slow WebSocket consumer threadId={} connectionId={}", threadId, connectionId);
+					closeReason.tryEmitValue(SLOW_CONSUMER);
+				})
+				.then();
+		Mono<Void> evicted = evictionNotice.then()
 				.then(Mono.delay(EVICTED_FRAME_FLUSH_GRACE_PERIOD))
-				.then(Mono.defer(() -> session.close(CloseStatus.NORMAL)));
+				.doOnSuccess(ignored -> closeReason.tryEmitValue(CloseStatus.NORMAL))
+				.then();
 
-		return Mono.firstWithSignal(messageLoop, tokenExpiry, slowConsumer, evictedClose)
-				.doFinally(ignored -> roomSessionRegistry.leave(threadId, connectionId, actor)
-						.ifPresent(generation -> collabMessageDispatcher.closeGeneration(threadId, generation)));
+		// 정상 종료 경로 — send(outbound)가 완료된(= outbound가 사유로 끊긴) 뒤에 그 사유로 한 번
+		// 닫는다. 이 시점엔 session.send()가 살아 있지 않고 session.receive()는 독립 구독이라,
+		// 채널이 온전한 상태에서 close 프레임이 나간다(정확한 close code).
+		Mono<Void> cleanClose = session.send(outbound)
+				.then(closeReason.asMono())
+				.flatMap(session::close);
+		// 안전장치 — send가 backpressure로 끝나지 않으면(느린 소비자) 사유 확정 후 잠깐 기다렸다가
+		// 직접 닫는다. cleanClose에 우선권을 주는 지연이다.
+		Mono<Void> forceClose = closeReason.asMono()
+				.delayElement(CLOSE_DRAIN_GRACE_PERIOD)
+				.flatMap(session::close);
+		Mono<Void> lifecycle = Mono.firstWithSignal(cleanClose, forceClose);
+
+		// 트리거·inboundPump는 side-effect만 낸다. 스스로 이겨서는 안 되므로(그러면 lifecycle이
+		// 취소돼 close가 안 불린다) then(Mono.never())로 매달아 둔다 — lifecycle이 닫고 완료하면
+		// firstWithSignal이 함께 취소한다.
+		return Mono.firstWithSignal(lifecycle, inboundPump.then(Mono.never()),
+						tokenExpiry.then(Mono.never()), slowConsumer.then(Mono.never()),
+						evicted.then(Mono.never()))
+				.doFinally(signal -> {
+					// [#181 계측] 연결 수명 — 근-만료 토큰 무한 재발급(이슈 #181) 원인 규명용. 실서버
+					// 배포 후 원인이 확정되면 제거한다(진행 상황은 이슈 #181 코멘트에 남긴다).
+					log.debug("[#181] WS session end threadId={} connectionId={} signal={} livedMs={}",
+							threadId, connectionId, signal, Duration.between(now, Instant.now()).toMillis());
+					roomSessionRegistry.leave(threadId, connectionId, actor)
+							.ifPresent(generation -> collabMessageDispatcher.closeGeneration(threadId, generation));
+				});
 	}
 
 	private Mono<WsFrame> handleInbound(WebSocketMessage message, UUID threadId, UUID userId,
