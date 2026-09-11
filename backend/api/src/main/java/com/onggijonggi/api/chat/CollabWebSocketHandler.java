@@ -246,6 +246,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 						tokenExpiry.then(Mono.never()), slowConsumer.then(Mono.never()),
 						evicted.then(Mono.never()))
 				.doFinally(signal -> {
+					// [#181 계측] 연결 수명 — 근-만료 토큰 무한 재발급(Q4) 규명용. 정리 시점은 협업채팅-181 문서 참조.
 					log.debug("[#181] WS session end threadId={} connectionId={} signal={} livedMs={}",
 							threadId, connectionId, signal, Duration.between(now, Instant.now()).toMillis());
 					roomSessionRegistry.leave(threadId, connectionId, actor)
