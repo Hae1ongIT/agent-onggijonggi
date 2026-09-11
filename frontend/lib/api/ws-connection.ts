@@ -30,7 +30,8 @@
 import { getSession, signIn } from 'next-auth/react';
 import { bffWsUrl, collabWsPath } from './config';
 
-/** [#181 계측] JWT payload의 exp를 읽어 지금 대비 몇 초 남았는지 — 근본 원인 규명 후 제거한다. */
+/** JWT payload의 exp를 읽어 지금 대비 몇 초 남았는지. 파싱 불가·exp 없음이면 null.
+ * freshToken()의 근-만료 토큰 판정(이슈 #181)에 쓴다 — `[#181][ws]` 계측 로그에도 함께 실린다. */
 function tokenSkewSeconds(token: string | null | undefined): number | null {
   if (!token) return null;
   try {
@@ -61,6 +62,17 @@ const RECONNECT_BACKOFF_CAP_MS = 10_000;
  * /api/auth/session을 두드리게 되고, 너무 늘리면 낡은 토큰으로 헛도는 시간이 길어진다. 3회면 백오프
  * 곡선상 약 7초다. */
 const HANDSHAKE_FAILURES_BEFORE_REFRESH = 3;
+
+/** getSession()이 돌려준 토큰의 잔여 수명이 이 값(초) 미만이면 "쓸 수 있는 토큰을 못 받았다"로 본다.
+ * lib/auth/refresh-gate.ts의 REFRESH_MARGIN_MS가 동작하면 갓 조회한 토큰은 늘 (수명 - 마진)만큼
+ * 남아 있어 여기 걸리지 않는다. 걸린다는 건 리프레시가 사실상 실패했다는 뜻이라 어떤 재연결로도
+ * 못 푼다(이슈 #181).
+ * IMPORTANT: 실서버 Keycloak Access Token Lifespan이 초 단위이면 이 값도 재조정 대상이다. */
+const MIN_USABLE_TOKEN_LIFE_S = 10;
+
+/** 근-만료 토큰을 이만큼 연속으로 받으면 재로그인시킨다. 1회는 마침 그 순간 만료된 경합일 수
+ * 있으나, 연속이면 세션이 쓸 만한 토큰을 내주지 못하는 상태다 — #181 루프가 여기서 끝난다. */
+const SHORT_LIVED_TOKENS_BEFORE_REAUTH = 2;
 
 /** 표준 WebSocket에서 이 계층이 실제로 쓰는 부분만 추린 구조적 타입. vitest 환경이 'node'라
  * 전역 WebSocket이 없어, 테스트가 가짜 소켓을 끼울 수 있어야 한다. */
@@ -186,17 +198,33 @@ export function openWsConnection(
     await deps.signIn('keycloak');
   };
 
+  // freshToken()이 근-만료 토큰을 연속으로 몇 번 받았는지 — SHORT_LIVED_TOKENS_BEFORE_REAUTH에서 재로그인.
+  let shortLivedTokens = 0;
+
   /** 세션을 다시 조회해 액세스 토큰을 얻는다. 리프레시가 이미 실패한 세션은 어떤 재연결로도
-   * 살아나지 않으므로 곧장 재로그인으로 보낸다(http.ts와 같은 판단). */
+   * 살아나지 않으므로 곧장 재로그인으로 보낸다(http.ts와 같은 판단). 토큰은 왔지만 수명이
+   * 얼마 안 남은 상태가 연속되면(리프레시가 사실상 안 되는 것) 역시 재로그인으로 보낸다(이슈 #181). */
   const freshToken = async (): Promise<string | null> => {
     const session = await deps.getSession();
+    const lifeSeconds = tokenSkewSeconds(session?.accessToken);
     // [#181 계측] getSession()이 매번 돌려주는 토큰의 수명 + error 상태. 근-사망 토큰 무한 재발급 확인용.
     console.info(
-      `[#181][ws] freshToken error=${session?.error ?? 'none'} hasToken=${!!session?.accessToken} skewSeconds=${tokenSkewSeconds(session?.accessToken)}`,
+      `[#181][ws] freshToken error=${session?.error ?? 'none'} hasToken=${!!session?.accessToken} skewSeconds=${lifeSeconds} shortLived=${shortLivedTokens}`,
     );
     if (session?.error === 'RefreshAccessTokenError' || !session?.accessToken) {
       await forceReauth();
       return null;
+    }
+    // close code가 아니라 토큰 자체로 판정한다 — "핸드셰이크는 통과하는데 곧 만료"인 토큰을
+    // 무한히 받는 상태(#181)를 여기서 끊는다. null(파싱 불가)은 판정하지 않고 통과시킨다.
+    if (lifeSeconds !== null && lifeSeconds < MIN_USABLE_TOKEN_LIFE_S) {
+      shortLivedTokens += 1;
+      if (shortLivedTokens >= SHORT_LIVED_TOKENS_BEFORE_REAUTH) {
+        await forceReauth();
+        return null;
+      }
+    } else {
+      shortLivedTokens = 0;
     }
     return session.accessToken;
   };

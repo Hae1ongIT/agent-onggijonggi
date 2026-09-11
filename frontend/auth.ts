@@ -5,6 +5,10 @@
  next-auth 설정의 단일 진실 원천은 이 파일뿐이다.
  *********************************************************/
 
+import {
+  REFRESH_MARGIN_MS,
+  needsProactiveRefresh,
+} from '@/lib/auth/refresh-gate';
 import NextAuth from 'next-auth';
 import type { JWT } from 'next-auth/jwt';
 import Keycloak from 'next-auth/providers/keycloak';
@@ -96,15 +100,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         typeof token.accessTokenExpires === 'number'
           ? Math.round((token.accessTokenExpires - Date.now()) / 1000)
           : 'unset';
-      if (
-        token.accessTokenExpires &&
-        Date.now() < (token.accessTokenExpires as number)
-      ) {
-        console.info(`[#181][auth] jwt: token still valid, skipping refresh (expIn=${expIn}s)`);
+      if (!needsProactiveRefresh(token.accessTokenExpires)) {
+        console.info(
+          `[#181][auth] jwt: token still valid, skipping refresh (expIn=${expIn}s, margin=${REFRESH_MARGIN_MS / 1000}s)`,
+        );
         return token;
       }
 
-      console.info(`[#181][auth] jwt: refreshing (expIn=${expIn}s, prevError=${token.error ?? 'none'})`);
+      console.info(
+        `[#181][auth] jwt: refreshing (expIn=${expIn}s, prevError=${token.error ?? 'none'})`,
+      );
       return refreshAccessToken(token);
     },
     async session({ session, token }) {

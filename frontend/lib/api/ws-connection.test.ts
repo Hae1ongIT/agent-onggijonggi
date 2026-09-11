@@ -10,6 +10,16 @@ import {
 
 const THREAD_ID = '11111111-1111-4111-8111-111111111111';
 
+/** tokenSkewSeconds()가 실제 JWT처럼 파싱할 수 있는 토큰. exp는 지금부터 seconds 뒤.
+ * 'access_token'·'t1' 같은 문자열은 JWT가 아니라 tokenSkewSeconds()가 null을 돌려주고,
+ * null이면 freshToken()의 근-만료 판정이 건너뛰어진다 — 그 판정을 실제로 태우려면 이 헬퍼가 필요하다. */
+function jwtWithLife(seconds: number): string {
+  const payload = btoa(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + seconds }),
+  );
+  return `h.${payload}.s`;
+}
+
 /** 테스트가 open·message·close 시점을 직접 잡을 수 있는 가짜 소켓. vitest 환경이 'node'라
  * 전역 WebSocket이 없고, 있더라도 close code를 마음대로 만들어낼 수 없다. */
 class FakeSocket implements SocketLike {
@@ -270,27 +280,41 @@ describe('openWsConnection', () => {
 });
 
 describe('openWsConnection - [#181] 근-만료 토큰 무한 재발급', () => {
-  // 서버 수정(3e26900) 후 브라우저는 만료 강제 종료 시 4000을 정확히 받는다. 하지만
-  // getSession()/freshToken()이 매번 error 없는 근-만료 토큰을 돌려주면(Q4 미확정) 루프는
-  // 이어진다. 아래 두 테스트는 현재 프론트 동작을 고정한다 — 백오프 판정 수정(문서 3번)이
-  // 들어오면 뒤집는다(그때는 몇 사이클 뒤 forceReauth로 종료돼야 한다).
+  // 서버 수정(3e26900) 후 브라우저는 만료 강제 종료 시 4000을 정확히 받는다. freshToken()이
+  // 근-만료 토큰(수명 < MIN_USABLE_TOKEN_LIFE_S)을 SHORT_LIVED_TOKENS_BEFORE_REAUTH회 연속
+  // 받으면 재로그인으로 루프를 끝낸다(B′, 문서 상세 3). 1006(서버 수정 전) 경로는 B′가
+  // 건드리지 않으므로 현재 동작을 그대로 고정한다.
 
-  it('소켓이 열리자마자 4000으로 닫히면, 대기 없이 무한 재접속하고 재로그인하지 않는다', async () => {
-    const h = harness([{ accessToken: 'near-expiry' }]);
+  it('4000으로 닫히고 재조회 토큰도 근-만료면, 몇 사이클 뒤 재로그인시킨다', async () => {
+    const h = harness([{ accessToken: jwtWithLife(1) }]);
 
-    for (const n of [1, 2, 3, 4, 5]) {
-      const socket = await h.waitForSocket(n);
-      socket.open();
-      socket.serverClose(CLOSE_TOKEN_EXPIRED);
-    }
-    await h.waitForSocket(6);
+    const first = await h.waitForSocket(1);
+    first.open();
+    first.serverClose(CLOSE_TOKEN_EXPIRED);
 
-    // 만료 분기(if code === CLOSE_TOKEN_EXPIRED)는 세션 재조회 후 대기 없이 재접속한다.
+    // freshToken()이 근-만료 토큰을 SHORT_LIVED_TOKENS_BEFORE_REAUTH회 연속 받으면 재로그인.
+    await vi.waitFor(() => expect(h.signIn).toHaveBeenCalledWith('keycloak'));
+    // 만료 분기라 백오프 sleep 없이 돌다가 종료한다.
     expect(h.sleep).not.toHaveBeenCalled();
-    // 매 사이클 freshToken()을 부르지만 같은 토큰(error 없음)이라 null이 아니고 루프가 계속된다.
-    expect(h.getSession.mock.calls.length).toBeGreaterThanOrEqual(6);
-    // "열자마자 만료 2연속 → 재로그인" 상한은 !opened 경로에서만 걸려 도달하지 않는다.
+    // 소켓은 한 번만 만들어지고 루프가 끝난다 — 무한 재접속이 아니다.
+    expect(h.sockets).toHaveLength(1);
+  });
+
+  it('4000으로 닫혀도 재조회한 토큰 수명이 넉넉하면 재로그인 없이 재접속한다', async () => {
+    const healthy = jwtWithLife(300);
+    const h = harness([
+      { accessToken: jwtWithLife(1) },
+      { accessToken: healthy },
+    ]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    first.serverClose(CLOSE_TOKEN_EXPIRED);
+
+    const second = await h.waitForSocket(2);
+    expect(second.protocols).toEqual(['access_token', healthy]);
     expect(h.signIn).not.toHaveBeenCalled();
+    expect(h.sleep).not.toHaveBeenCalled();
 
     h.connection.close();
   });
