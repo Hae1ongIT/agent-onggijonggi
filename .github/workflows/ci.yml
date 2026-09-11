@@ -126,6 +126,14 @@ jobs:
           FLYWAY_VERIFY_PASSWORD: flyway_verify
         run: ./gradlew :api:verifyFlywayMigrations --no-daemon
 
+      - name: Hibernate 매핑↔PostgreSQL 스키마 검증
+        working-directory: backend
+        env:
+          FLYWAY_VERIFY_JDBC_URL: jdbc:postgresql://localhost:5432/flyway_verify
+          FLYWAY_VERIFY_USERNAME: flyway_verify
+          FLYWAY_VERIFY_PASSWORD: flyway_verify
+        run: ./gradlew :api:verifyHibernateMapping --no-daemon
+
       - name: PostgreSQL 로그
         if: failure()
         run: docker logs ${{ job.services.postgres.id }}
