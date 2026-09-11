@@ -20,6 +20,22 @@ function jwtWithLife(seconds: number): string {
   return `h.${payload}.s`;
 }
 
+/** jwtWithLife()와 달리 iat도 실어 "토큰 자기 수명"(exp - iat)까지 판정에 쓰이게 한다 —
+ * usableTokenLifeFloorSeconds()의 극단 lifespan 하한 조정을 태우려면 iat가 필요하다. */
+function jwtWithTimes(
+  issuedSecondsAgo: number,
+  expiresInSeconds: number,
+): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = btoa(
+    JSON.stringify({
+      iat: now - issuedSecondsAgo,
+      exp: now + expiresInSeconds,
+    }),
+  );
+  return `h.${payload}.s`;
+}
+
 /** 테스트가 open·message·close 시점을 직접 잡을 수 있는 가짜 소켓. vitest 환경이 'node'라
  * 전역 WebSocket이 없고, 있더라도 close code를 마음대로 만들어낼 수 없다. */
 class FakeSocket implements SocketLike {
@@ -317,6 +333,39 @@ describe('openWsConnection - [#181] 근-만료 토큰 무한 재발급', () => {
     expect(h.sleep).not.toHaveBeenCalled();
 
     h.connection.close();
+  });
+
+  it('토큰 수명 자체가 짧으면(극단 설정) 근-만료 판정 하한도 그에 맞춰 낮아진다', async () => {
+    // 수명 15초짜리 토큰이 8초 남았다 — 고정 하한(10초)이면 8<10이라 오판하지만, 하한이
+    // 수명(15초)의 30%(4.5초)까지 낮아지므로 8초는 아직 "쓸 만한" 수명으로 본다.
+    const shortLifespanHealthy = jwtWithTimes(7, 8);
+    const h = harness([
+      { accessToken: jwtWithLife(1) },
+      { accessToken: shortLifespanHealthy },
+    ]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    first.serverClose(CLOSE_TOKEN_EXPIRED);
+
+    const second = await h.waitForSocket(2);
+    expect(second.protocols).toEqual(['access_token', shortLifespanHealthy]);
+    expect(h.signIn).not.toHaveBeenCalled();
+
+    h.connection.close();
+  });
+
+  it('토큰 수명이 짧아도 그 안에서마저 근-만료면(조정된 하한 밑) 여전히 재로그인으로 끝낸다', async () => {
+    // 수명 15초, 1초 남음 — 조정된 하한(4.5초)보다도 적어 여전히 근-만료로 잡혀야 한다.
+    const nearDead = jwtWithTimes(14, 1);
+    const h = harness([{ accessToken: nearDead }]);
+
+    const first = await h.waitForSocket(1);
+    first.open();
+    first.serverClose(CLOSE_TOKEN_EXPIRED);
+
+    await vi.waitFor(() => expect(h.signIn).toHaveBeenCalledWith('keycloak'));
+    expect(h.sockets).toHaveLength(1);
   });
 
   it('소켓이 열리자마자 1006으로 닫히면(서버 수정 전), 백오프가 1초에서 자라지 않는다', async () => {

@@ -28,19 +28,16 @@
  *********************************************************/
 
 import { getSession, signIn } from 'next-auth/react';
+import { decodeJwtTimes } from '../auth/refresh-gate';
 import { bffWsUrl, collabWsPath } from './config';
 
 /** JWT payload의 exp를 읽어 지금 대비 몇 초 남았는지. 파싱 불가·exp 없음이면 null.
- * freshToken()의 근-만료 토큰 판정(이슈 #181)에 쓴다 — `[#181][ws]` 계측 로그에도 함께 실린다. */
+ * freshToken()의 근-만료 토큰 판정(이슈 #181)에 쓴다 — `[#181][ws]` 계측 로그에도 함께 실린다.
+ * JWT 디코드 자체는 lib/auth/refresh-gate.ts와 공유한다 — A(선제 리프레시)·B′(이 판정) 둘 다
+ * 같은 디코더를 쓴다. */
 function tokenSkewSeconds(token: string | null | undefined): number | null {
-  if (!token) return null;
-  try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    if (typeof payload.exp !== 'number') return null;
-    return Math.round(payload.exp - Date.now() / 1000);
-  } catch {
-    return null;
-  }
+  const times = decodeJwtTimes(token);
+  return times ? Math.round((times.expiresAtMs - Date.now()) / 1000) : null;
 }
 
 /** 서브프로토콜의 첫 번째 값 — 서버 WsSubProtocolBearerTokenConverter.PROTOCOL_NAME과 반드시 같아야 한다. */
@@ -63,16 +60,37 @@ const RECONNECT_BACKOFF_CAP_MS = 10_000;
  * 곡선상 약 7초다. */
 const HANDSHAKE_FAILURES_BEFORE_REFRESH = 3;
 
-/** getSession()이 돌려준 토큰의 잔여 수명이 이 값(초) 미만이면 "쓸 수 있는 토큰을 못 받았다"로 본다.
- * lib/auth/refresh-gate.ts의 REFRESH_MARGIN_MS가 동작하면 갓 조회한 토큰은 늘 (수명 - 마진)만큼
- * 남아 있어 여기 걸리지 않는다. 걸린다는 건 리프레시가 사실상 실패했다는 뜻이라 어떤 재연결로도
- * 못 푼다(이슈 #181).
- * IMPORTANT: 실서버 Keycloak Access Token Lifespan이 초 단위이면 이 값도 재조정 대상이다. */
+/** getSession()이 돌려준 토큰의 잔여 수명이 이 값(초) 미만이면 "쓸 수 있는 토큰을 못 받았다"로
+ * 본다. WS 핸드셰이크 한 번에 걸리는 물리적 시간이라 토큰 수명에 비례하지 않는다(수명이 5분이든
+ * 5초든 핸드셰이크 시간은 같다) — 고정값을 쓴다. lib/auth/refresh-gate.ts의 선제 리프레시
+ * 마진이 동작하면 갓 조회한 토큰은 늘 이보다 넉넉히 남아 있어 여기 걸리지 않는다. 걸린다는 건
+ * 리프레시가 사실상 실패했다는 뜻이라 어떤 재연결로도 못 푼다(이슈 #181). */
 const MIN_USABLE_TOKEN_LIFE_S = 10;
+
+/** 다만 토큰 수명 자체가 MIN_USABLE_TOKEN_LIFE_S보다 짧은 극단 설정에서는 위 고정 하한이
+ * 정상 토큰까지 전부 근-만료로 오판하게 된다 — 그 경우에 한해 하한을 수명의 이 비율까지
+ * 낮춘다(이슈 #181, 2026-09-11). */
+const MIN_USABLE_TOKEN_LIFE_FRACTION = 0.3;
 
 /** 근-만료 토큰을 이만큼 연속으로 받으면 재로그인시킨다. 1회는 마침 그 순간 만료된 경합일 수
  * 있으나, 연속이면 세션이 쓸 만한 토큰을 내주지 못하는 상태다 — #181 루프가 여기서 끝난다. */
 const SHORT_LIVED_TOKENS_BEFORE_REAUTH = 2;
+
+/** "쓸 수 있는 토큰"의 최소 잔여 수명(초). 토큰 자기 수명(exp - iat)이 MIN_USABLE_TOKEN_LIFE_S
+ * 보다 짧으면(극단 설정) 고정 하한 대신 그 수명의 MIN_USABLE_TOKEN_LIFE_FRACTION을 쓴다 —
+ * 안 그러면 그런 설정에서 방금 발급된 정상 토큰마저 매번 근-만료로 오판한다. iat을 모르면
+ * (디코드 실패 등) 판단할 수명이 없으니 고정 하한 그대로 쓴다. */
+function usableTokenLifeFloorSeconds(
+  accessToken: string | null | undefined,
+): number {
+  const times = decodeJwtTimes(accessToken);
+  if (!times || times.issuedAtMs === null) return MIN_USABLE_TOKEN_LIFE_S;
+  const lifespanSeconds = (times.expiresAtMs - times.issuedAtMs) / 1000;
+  return Math.min(
+    MIN_USABLE_TOKEN_LIFE_S,
+    lifespanSeconds * MIN_USABLE_TOKEN_LIFE_FRACTION,
+  );
+}
 
 /** 표준 WebSocket에서 이 계층이 실제로 쓰는 부분만 추린 구조적 타입. vitest 환경이 'node'라
  * 전역 WebSocket이 없어, 테스트가 가짜 소켓을 끼울 수 있어야 한다. */
@@ -217,7 +235,10 @@ export function openWsConnection(
     }
     // close code가 아니라 토큰 자체로 판정한다 — "핸드셰이크는 통과하는데 곧 만료"인 토큰을
     // 무한히 받는 상태(#181)를 여기서 끊는다. null(파싱 불가)은 판정하지 않고 통과시킨다.
-    if (lifeSeconds !== null && lifeSeconds < MIN_USABLE_TOKEN_LIFE_S) {
+    if (
+      lifeSeconds !== null &&
+      lifeSeconds < usableTokenLifeFloorSeconds(session.accessToken)
+    ) {
       shortLivedTokens += 1;
       if (shortLivedTokens >= SHORT_LIVED_TOKENS_BEFORE_REAUTH) {
         await forceReauth();

@@ -6,8 +6,8 @@
  *********************************************************/
 
 import {
-  REFRESH_MARGIN_MS,
   needsProactiveRefresh,
+  proactiveRefreshMarginMs,
 } from '@/lib/auth/refresh-gate';
 import NextAuth from 'next-auth';
 import type { JWT } from 'next-auth/jwt';
@@ -100,9 +100,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         typeof token.accessTokenExpires === 'number'
           ? Math.round((token.accessTokenExpires - Date.now()) / 1000)
           : 'unset';
-      if (!needsProactiveRefresh(token.accessTokenExpires)) {
+      if (!needsProactiveRefresh(token.accessToken, token.accessTokenExpires)) {
+        const marginS = Math.round(
+          proactiveRefreshMarginMs(token.accessToken) / 1000,
+        );
         console.info(
-          `[#181][auth] jwt: token still valid, skipping refresh (expIn=${expIn}s, margin=${REFRESH_MARGIN_MS / 1000}s)`,
+          `[#181][auth] jwt: token still valid, skipping refresh (expIn=${expIn}s, margin=${marginS}s)`,
         );
         return token;
       }
