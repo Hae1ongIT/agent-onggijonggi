@@ -12,11 +12,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { fetchCollabMessages } from '@/lib/api/collab';
 import { type WsConnection, openWsConnection } from '@/lib/api/ws-connection';
 import { parseFrameFromText } from '@/lib/transport/parse-frame';
 import {
   type RoomState,
   applyFrame,
+  applyHistory,
   clearRoomError,
   dismissNotice as dismissNoticeIn,
   initialRoomState,
@@ -59,9 +61,40 @@ export function useCollabRoom(threadId: string): CollabRoom {
   const [state, setState] = useState<RoomState>(initialRoomState);
   const [connection, setConnection] = useState<RoomConnection>('connecting');
   const connectionRef = useRef<WsConnection | null>(null);
+  /** 따라잡기 요청에 실을 커서. WS 콜백이 최신 값을 봐야 해서 ref로 따로 둔다. */
+  const lastSeqRef = useRef<number | null>(null);
   const [participantsRevision, setParticipantsRevision] = useState(0);
 
+  /**
+   * 과거 대화는 진입할 때 REST로 한 번만 불러온다(이슈 #190). 이후의 실시간은 아래 WS가 맡는다.
+   *
+   * WS 연결을 기다리지 않고 나란히 시작한다 — 둘이 겹쳐 도착해도 applyHistory가 msgId로 걸러
+   * 한 번만 남기므로 한쪽을 늦출 이유가 없다. 이력을 못 얻는 것은 방을 못 열 이유가 아니라,
+   * 실패해도 빈 흐름으로 계속 간다.
+   */
   useEffect(() => {
+    let alive = true;
+    fetchCollabMessages(threadId)
+      .then((items) => {
+        if (alive) setState((current) => applyHistory(current, items));
+      })
+      .catch((error) => {
+        console.error('[collab] 이력을 불러오지 못했습니다', error);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    lastSeqRef.current = state.lastSeq;
+  }, [state.lastSeq]);
+
+  useEffect(() => {
+    // 첫 연결은 위의 진입 이력이 이미 맡았다. 여기서 세는 것은 "그 뒤에 다시 붙었는가"다.
+    let reconnected = false;
+    let alive = true;
+
     const ws = openWsConnection(threadId, {
       onMessage: (data) => {
         // 해석되지 않는 프레임은 parse-frame.ts가 null로 흘려보낸다 — 화면을 멈출 이유가 아니다.
@@ -84,11 +117,35 @@ export function useCollabRoom(threadId: string): CollabRoom {
           setState((current) => applyFrame(current, frame));
         }
       },
-      onOpenChange: (open) => setConnection(open ? 'open' : 'reconnecting'),
+      /**
+       * 끊겼다 다시 붙으면 그 동안 오간 메시지를 따라잡는다(이슈 #190). 방송은 그 순간 붙어
+       * 있는 연결에만 가고 다시 틀어주지 않아, 재연결만으로는 구멍이 그대로 남는다.
+       *
+       * 마지막으로 받은 seq 이후만 요청한다 — "빠진 번호를 기다린다"가 아니다. 서버가 seq를
+       * 블록으로 예약해 쓰지 않은 번호가 구멍으로 남으므로, 다음 번호를 기다리면 영영 멈춘다.
+       * 아직 하나도 못 받았으면(null) 커서 없이 전부 받는다.
+       */
+      onOpenChange: (open) => {
+        setConnection(open ? 'open' : 'reconnecting');
+        if (!open) {
+          reconnected = true;
+          return;
+        }
+        if (!reconnected) return;
+        reconnected = false;
+        fetchCollabMessages(threadId, lastSeqRef.current ?? undefined)
+          .then((items) => {
+            if (alive) setState((current) => applyHistory(current, items));
+          })
+          .catch((error) => {
+            console.error('[collab] 끊긴 동안의 대화를 따라잡지 못했습니다', error);
+          });
+      },
     });
     connectionRef.current = ws;
 
     return () => {
+      alive = false;
       ws.close();
       connectionRef.current = null;
     };

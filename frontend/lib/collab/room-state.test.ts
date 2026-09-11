@@ -1,3 +1,4 @@
+import type { CollabMessageItem } from '@/lib/api/collab';
 import { describe, expect, it } from 'vitest';
 import type { Citation } from '@/lib/api/chat';
 import type { PresenceParticipant, WsFrame } from '@/lib/transport/frames';
@@ -5,6 +6,7 @@ import {
   type CollabMessage,
   type RoomState,
   applyFrame,
+  applyHistory,
   clearRoomError,
   dismissNotice,
   initialRoomState,
@@ -35,10 +37,21 @@ function snapshot(...subjects: string[]): WsFrame {
   };
 }
 
-function say(from: string, content: string): WsFrame {
+/** 프레임마다 새 msgId를 준다 — 서버가 메시지마다 다른 id를 싣는 것과 같다(이슈 #190). */
+let frameCounter = 0;
+
+function say(
+  from: string,
+  content: string,
+  msgId?: string,
+  seq?: number,
+): WsFrame {
+  frameCounter += 1;
   return {
     type: 'chat.message',
     sessionId: THREAD,
+    msgId: msgId ?? `msg-${frameCounter}`,
+    seq: seq ?? frameCounter,
     from,
     fromDisplayName: `${from} 님`,
     content,
@@ -66,11 +79,15 @@ function answer(
   metadata: {
     citations?: Citation[];
     restrictedResultsOmitted?: boolean;
+    /** 같은 턴의 패킷은 같은 msgId를 단다. 턴을 나누고 싶을 때만 다른 값을 준다. */
+    msgId?: string;
   } = {},
 ): WsFrame {
   return {
     type: 'chat.answer',
     sessionId: THREAD,
+    msgId: metadata.msgId ?? 'agent-msg-1',
+    seq: 1000,
     delta,
     citations: metadata.citations ?? [],
     restrictedResultsOmitted: metadata.restrictedResultsOmitted ?? false,
@@ -178,14 +195,16 @@ describe('applyFrame - 입퇴장 시스템 라인(#111)', () => {
     expect(state.messages).toEqual([
       { id: 'm1', event: 'join', participant: person('sujin') },
       {
-        id: 'm2',
+        id: expect.any(String),
+        seq: expect.any(Number),
         from: person('sujin'),
         content: '안녕하세요',
         streaming: false,
         citations: [],
         restrictedResultsOmitted: false,
       },
-      { id: 'm3', event: 'leave', participant: person('sujin') },
+      // 입퇴장 줄 번호는 서버 msgId를 쓰는 메시지와 카운터를 나눠 쓰지 않는다(이슈 #190).
+      { id: 'm2', event: 'leave', participant: person('sujin') },
     ]);
   });
 
@@ -212,7 +231,7 @@ describe('applyFrame - 입퇴장 시스템 라인(#111)', () => {
     expect(chats(state)).toHaveLength(1);
     expect(chats(state)[0].content).toBe('요약을 시작합니다');
     expect(state.messages[1]).toEqual({
-      id: 'm2',
+      id: 'm1',
       event: 'join',
       participant: person('minho'),
     });
@@ -221,10 +240,11 @@ describe('applyFrame - 입퇴장 시스템 라인(#111)', () => {
 
 describe('applyFrame - chat.message', () => {
   it('보낸 사람을 함께 남긴다', () => {
-    const state = fold([say('sujin', '이 계약서 확인 부탁해요')]);
+    const state = fold([say('sujin', '이 계약서 확인 부탁해요', 'msg-sujin-1')]);
     expect(state.messages).toEqual([
       {
-        id: 'm1',
+        id: 'msg-sujin-1',
+        seq: expect.any(Number),
         from: person('sujin'),
         content: '이 계약서 확인 부탁해요',
         streaming: false,
@@ -251,10 +271,12 @@ describe('applyFrame - chat.answer', () => {
     });
   });
 
-  it('답변이 끝난 뒤 오는 패킷은 새 말풍선이 된다', () => {
+  it('다른 턴의 답변은 새 말풍선이 된다', () => {
+    // 예전에는 "앞 답변이 끝났는지"로 갈랐다. 이제 프레임이 턴 식별자(msgId)를 들고 오므로
+    // 그 값으로 가른다(이슈 #190) — 턴이 겹쳐 도착해도 섞이지 않는다.
     const state = fold([
       answer('첫 답변', 'done'),
-      answer('두 번째 답변', 'done'),
+      answer('두 번째 답변', 'done', { msgId: 'agent-msg-2' }),
     ]);
     expect(chats(state).map((m) => m.content)).toEqual([
       '첫 답변',
@@ -486,4 +508,162 @@ describe('system.notice(#29)', () => {
     expect(after).toBe(before);
   });
 
+});
+describe('applyHistory - 방 진입 시 과거 대화(#190)', () => {
+  const historyItem = (
+    id: string,
+    seq: number,
+    content: string,
+    overrides: Partial<CollabMessageItem> = {},
+  ): CollabMessageItem => ({
+    id,
+    seq,
+    athKind: 'HUMAN',
+    status: 'COMPLETE',
+    content,
+    authorSubject: 'sujin',
+    authorDisplayName: 'sujin 님',
+    createdAt: '2026-09-10T01:00:00Z',
+    completedAt: '2026-09-10T01:00:00Z',
+    ...overrides,
+  });
+
+  it('seq 순서로 흐름 앞에 붙인다', () => {
+    const state = applyHistory(initialRoomState, [
+      historyItem('b', 5, '나중'),
+      historyItem('a', 1, '먼저'),
+    ]);
+    expect(chats(state).map((m) => m.content)).toEqual(['먼저', '나중']);
+  });
+
+  it('seq가 띄엄띄엄해도 그대로 받는다 — 블록 예약이 남긴 구멍이다', () => {
+    const state = applyHistory(initialRoomState, [
+      historyItem('a', 0, '하나'),
+      historyItem('b', 97, '둘'),
+    ]);
+    expect(chats(state).map((m) => m.seq)).toEqual([0, 97]);
+  });
+
+  it('이미 WS로 받은 메시지는 msgId로 걸러 두 번 그리지 않는다', () => {
+    const live = fold([say('sujin', '실시간으로 먼저 왔다', 'dup-1')]);
+    const state = applyHistory(live, [historyItem('dup-1', 3, '실시간으로 먼저 왔다')]);
+    expect(chats(state)).toHaveLength(1);
+  });
+
+  it('이력이 실시간보다 앞에 온다', () => {
+    const live = fold([say('sujin', '방금 말', 'live-1')]);
+    const state = applyHistory(live, [historyItem('old-1', 0, '예전 말')]);
+    expect(chats(state).map((m) => m.content)).toEqual(['예전 말', '방금 말']);
+  });
+
+  it('AGENT는 보낸 사람 없이 AI 답변으로 남는다', () => {
+    const state = applyHistory(initialRoomState, [
+      historyItem('a', 0, '답변입니다', {
+        athKind: 'AGENT',
+        authorSubject: null,
+        authorDisplayName: null,
+      }),
+    ]);
+    expect(chats(state)[0].from).toBeNull();
+  });
+
+  it('본문이 빈 행(PENDING·CANCELLED)은 빈 말풍선을 만들지 않는다', () => {
+    const state = applyHistory(initialRoomState, [
+      historyItem('a', 0, '', { athKind: 'AGENT', status: 'CANCELLED' }),
+    ]);
+    expect(state.messages).toEqual([]);
+  });
+
+  it('SYSTEM은 그리지 않는다 — 사람도 AI도 아닌 줄을 이 화면이 표현하지 못한다', () => {
+    const state = applyHistory(initialRoomState, [
+      historyItem('a', 0, '위험 표현이 감지되었습니다', { athKind: 'SYSTEM' }),
+    ]);
+    expect(state.messages).toEqual([]);
+  });
+
+  it('입퇴장 줄은 제자리에 남는다 — seq가 없어 정렬 대상이 아니다', () => {
+    const live = fold([join('minho')]);
+    const state = applyHistory(live, [historyItem('old-1', 0, '예전 말')]);
+    expect(state.messages).toHaveLength(2);
+    expect(isPresenceNotice(state.messages[1])).toBe(true);
+  });
+});
+
+describe('재접속 따라잡기 커서(#190)', () => {
+  const item = (
+    id: string,
+    seq: number,
+    content: string,
+    overrides: Partial<CollabMessageItem> = {},
+  ): CollabMessageItem => ({
+    id,
+    seq,
+    athKind: 'HUMAN',
+    status: 'COMPLETE',
+    content,
+    authorSubject: 'sujin',
+    authorDisplayName: 'sujin 님',
+    createdAt: '2026-09-10T01:00:00Z',
+    completedAt: '2026-09-10T01:00:00Z',
+    ...overrides,
+  });
+
+  it('아직 아무것도 못 받았으면 커서가 없다', () => {
+    expect(initialRoomState.lastSeq).toBeNull();
+  });
+
+  it('실시간으로 받은 메시지가 커서를 민다', () => {
+    const state = fold([say('sujin', '안녕', 'live-1', 42)]);
+    expect(state.lastSeq).toBe(42);
+  });
+
+  it('이력을 받아도 커서가 가장 큰 seq로 간다', () => {
+    const state = applyHistory(initialRoomState, [
+      item('a', 3, '먼저'),
+      item('b', 11, '나중'),
+    ]);
+    expect(state.lastSeq).toBe(11);
+  });
+
+  it('그리지 않은 줄(SYSTEM)도 커서는 지나친다 — 다음 따라잡기가 또 받으면 안 된다', () => {
+    const state = applyHistory(initialRoomState, [
+      item('sys', 7, '위험 감지', { athKind: 'SYSTEM' }),
+    ]);
+    expect(state.messages).toEqual([]);
+    expect(state.lastSeq).toBe(7);
+  });
+
+  it('커서는 뒤로 가지 않는다', () => {
+    const ahead = applyHistory(initialRoomState, [item('a', 20, '먼 미래')]);
+    const behind = applyHistory(ahead, [item('b', 5, '과거')]);
+    expect(behind.lastSeq).toBe(20);
+  });
+
+  it('따라잡은 메시지는 흐름 끝에 붙는다 — 이력보다 새것이다', () => {
+    const entered = applyHistory(initialRoomState, [item('old', 0, '예전 말')]);
+    const caughtUp = applyHistory(entered, [item('gap', 9, '끊긴 동안의 말')]);
+    expect(chats(caughtUp).map((m) => m.content)).toEqual([
+      '예전 말',
+      '끊긴 동안의 말',
+    ]);
+  });
+
+  it('따라잡기가 이미 받은 것과 겹쳐도 한 번만 남는다', () => {
+    const live = fold([say('sujin', '이미 받은 말', 'dup-9', 9)]);
+    const caughtUp = applyHistory(live, [
+      item('dup-9', 9, '이미 받은 말'),
+      item('new-10', 10, '못 받았던 말'),
+    ]);
+    expect(chats(caughtUp).map((m) => m.content)).toEqual([
+      '이미 받은 말',
+      '못 받았던 말',
+    ]);
+  });
+
+  it('seq가 띄엄띄엄해도 따라잡기가 멈추지 않는다 — 구멍은 기다리지 않는다', () => {
+    const entered = applyHistory(initialRoomState, [item('a', 0, '하나')]);
+    const caughtUp = applyHistory(entered, [item('b', 97, '둘')]);
+    expect(chats(caughtUp).map((m) => m.seq)).toEqual([0, 97]);
+    expect(caughtUp.lastSeq).toBe(97);
+  });
 });
