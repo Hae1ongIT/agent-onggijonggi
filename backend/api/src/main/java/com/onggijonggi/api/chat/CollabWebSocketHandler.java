@@ -163,7 +163,8 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		RoomSessionRegistry.RoomMembership membership = roomSessionRegistry.join(threadId, connectionId, actor);
 
 		// [#181 계측] 핸드셰이크 통과 시점에 토큰이 exp 대비 몇 초 남았는지 — 근-만료 토큰 무한
-		// 재발급(Q4) 규명용. 로그 레벨 debug — 정리 시점은 협업채팅-181 문서 참조.
+		// 재발급(이슈 #181) 원인 규명용, 로그 레벨 debug. 실서버 배포 후 원인이 확정되면 제거한다
+		// (진행 상황은 이슈 #181 코멘트에 남긴다 — docs/는 로컬 전용이라 팀 공유가 안 된다).
 		Instant now = Instant.now();
 		long skewSeconds = tokenExpiresAt == null ? Long.MIN_VALUE
 				: Duration.between(now, tokenExpiresAt).toSeconds();
@@ -246,7 +247,8 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 						tokenExpiry.then(Mono.never()), slowConsumer.then(Mono.never()),
 						evicted.then(Mono.never()))
 				.doFinally(signal -> {
-					// [#181 계측] 연결 수명 — 근-만료 토큰 무한 재발급(Q4) 규명용. 정리 시점은 협업채팅-181 문서 참조.
+					// [#181 계측] 연결 수명 — 근-만료 토큰 무한 재발급(이슈 #181) 원인 규명용. 실서버
+					// 배포 후 원인이 확정되면 제거한다(진행 상황은 이슈 #181 코멘트에 남긴다).
 					log.debug("[#181] WS session end threadId={} connectionId={} signal={} livedMs={}",
 							threadId, connectionId, signal, Duration.between(now, Instant.now()).toMillis());
 					roomSessionRegistry.leave(threadId, connectionId, actor)
