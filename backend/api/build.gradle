@@ -47,3 +47,14 @@ tasks.register('verifyFlywayMigrations', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = 'com.onggijonggi.api.migration.FlywayMigrationVerifier'
 }
+
+tasks.register('verifyHibernateMapping', JavaExec) {
+	group = 'verification'
+	description = 'Validates that JPA entity mappings match the PostgreSQL schema Flyway applied.'
+	dependsOn testClasses
+	// 둘 다 같은 DB를 보는데 Gradle은 그 사실을 모른다 — CI는 yml 스텝 순서로 이미 보장되지만,
+	// 로컬에서 두 task를 한 명령으로 부를 때도 순서가 깨지지 않게 명시한다.
+	mustRunAfter tasks.named('verifyFlywayMigrations')
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.onggijonggi.api.migration.HibernateMappingVerifier'
+}
