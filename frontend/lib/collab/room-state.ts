@@ -240,8 +240,10 @@ function insertBySeq(
   return merged;
 }
 
-/** 받은 것 중 가장 큰 seq. 커서는 뒤로 가지 않는다. */
-function advanceCursor(current: number | null, seq: number): number {
+/** 받은 것 중 가장 큰 seq. 커서는 뒤로 가지 않는다. `use-collab-room.ts`가 최초 연결
+ * 따라잡기(#208)에서 `lastSeqRef`를 setState 렌더를 기다리지 않고 그 자리에서 미리 계산할
+ * 때도 같은 규칙을 쓰려고 내보낸다 — 규칙이 두 곳에 따로 적히면 어긋날 수 있다. */
+export function advanceCursor(current: number | null, seq: number): number {
   return current === null || seq > current ? seq : current;
 }
 
@@ -265,7 +267,9 @@ export function applyHistory(
   items: CollabMessageItem[],
 ): RoomState {
   const known = new Set(
-    state.messages.filter((entry) => !isPresenceNotice(entry)).map((entry) => entry.id),
+    state.messages
+      .filter((entry) => !isPresenceNotice(entry))
+      .map((entry) => entry.id),
   );
   const restored = items
     .filter((item) => !known.has(item.id))
