@@ -79,13 +79,13 @@ class CollabWebSocketHandlerTest {
 		UUID threadId = rooms.openRoom("collab-ws-user");
 		String received = exchange("collab-ws-user", threadId,
 				List.of("""
-						{"type":"chat.message","content":"hello","sessionId":"ignored","from":"ignored"}
+						{"type":"chat.message","content":"hello","threadId":"ignored","from":"ignored"}
 						"""), 1).get(0);
 
 		WsFrame frame = objectMapper.readValue(received, WsFrame.class);
 
 		assertThat(frame).isInstanceOfSatisfying(ChatMessageFrame.class, message -> {
-			assertThat(message.sessionId()).isEqualTo(threadId);
+			assertThat(message.threadId()).isEqualTo(threadId);
 			assertThat(message.from()).isNotNull();
 			assertThat(message.content()).isEqualTo("hello");
 		});
@@ -104,7 +104,7 @@ class CollabWebSocketHandlerTest {
 						"""), 1).get(0);
 
 		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received, WsFrame.class);
-		assertThat(error.sessionId()).isEqualTo(threadId);
+		assertThat(error.threadId()).isEqualTo(threadId);
 		assertThat(error.code()).isEqualTo("THREAD_LOCKED");
 	}
 
@@ -120,7 +120,7 @@ class CollabWebSocketHandlerTest {
 		WsFrame frame = objectMapper.readValue(received.get(0), WsFrame.class);
 
 		assertThat(frame).isInstanceOfSatisfying(PresenceSnapshotFrame.class, snapshot -> {
-			assertThat(snapshot.sessionId()).isEqualTo(threadId);
+			assertThat(snapshot.threadId()).isEqualTo(threadId);
 			// 방에 혼자여도 자기 자신은 들어 있다(이슈 #26). userId는 fixture가 돌려주지 않아
 			// 값 자체는 RoomSessionRegistryTest가 확인한다.
 			assertThat(snapshot.participants()).hasSize(1);
@@ -152,13 +152,55 @@ class CollabWebSocketHandlerTest {
 	void ignoresKnownServerOnlyFrameTypes() throws Exception {
 		UUID threadId = rooms.openRoom("server-frame-user");
 		List<String> received = exchange("server-frame-user", threadId,
-				List.of("{\"type\":\"presence.join\",\"sessionId\":\"" + threadId + "\"}",
-						"{\"type\":\"presence.leave\",\"sessionId\":\"" + threadId + "\"}",
-						"{\"type\":\"system.notice\",\"sessionId\":\"" + threadId + "\"}",
+				List.of("{\"type\":\"presence.join\",\"threadId\":\"" + threadId + "\"}",
+						"{\"type\":\"presence.leave\",\"threadId\":\"" + threadId + "\"}",
+						"{\"type\":\"system.notice\",\"threadId\":\"" + threadId + "\"}",
+						"{\"type\":\"chat.queued\",\"threadId\":\"" + threadId + "\"}",
+						"{\"type\":\"pong\"}",
 						"{\"type\":\"chat.message\",\"content\":\"accepted\"}"), 1);
 
 		ChatMessageFrame frame = (ChatMessageFrame) objectMapper.readValue(received.get(0), WsFrame.class);
 		assertThat(frame.content()).isEqualTo("accepted");
+	}
+
+	/**
+	* 이슈 #160이 연 인바운드 프레임을 실제 소켓으로 한 번에 본다. 조용히 넘어가야 하는 것들 사이에
+	* 응답이 오는 것들을 섞고, 마지막 발화의 에코까지 받아 "조용한 것은 정말 아무것도 안 보냈다"를
+	* 순서로 확인한다(인바운드는 연결마다 순서대로 처리된다).
+	*/
+	@Test
+	void handlesSubscriptionCancelAndPingFramesAndEchoesTheClientIds() throws Exception {
+		UUID threadId = rooms.openRoom("inbound-frames-user");
+		UUID otherThreadId = UUID.randomUUID();
+		UUID clientMsgId = UUID.randomUUID();
+		UUID turnId = UUID.randomUUID();
+		List<String> received = exchange("inbound-frames-user", threadId, List.of(
+				"{\"type\":\"room.subscribe\",\"threadId\":\"" + threadId + "\"}",
+				"{\"type\":\"room.unsubscribe\",\"threadId\":\"" + otherThreadId + "\"}",
+				"{\"type\":\"chat.cancel\",\"threadId\":\"" + threadId + "\",\"turnId\":\"" + UUID.randomUUID() + "\"}",
+				"{\"type\":\"chat.cancel\",\"threadId\":\"" + otherThreadId + "\",\"turnId\":\"" + UUID.randomUUID() + "\"}",
+				"{\"type\":\"chat.cancel\",\"threadId\":\"" + threadId + "\"}",
+				"{\"type\":\"ping\"}",
+				"{\"type\":\"room.subscribe\",\"threadId\":\"" + otherThreadId + "\"}",
+				"{\"type\":\"room.unsubscribe\",\"threadId\":\"" + threadId + "\"}",
+				"{\"type\":\"chat.message\",\"content\":\"after\",\"clientMsgId\":\"" + clientMsgId
+						+ "\",\"turnId\":\"" + turnId + "\"}"), 5);
+
+		ErrorFrame missingTurn = (ErrorFrame) objectMapper.readValue(received.get(0), WsFrame.class);
+		WsFrame pong = objectMapper.readValue(received.get(1), WsFrame.class);
+		ErrorFrame otherRoomSubscribe = (ErrorFrame) objectMapper.readValue(received.get(2), WsFrame.class);
+		ErrorFrame ownRoomUnsubscribe = (ErrorFrame) objectMapper.readValue(received.get(3), WsFrame.class);
+		ChatMessageFrame echo = (ChatMessageFrame) objectMapper.readValue(received.get(4), WsFrame.class);
+
+		assertThat(missingTurn.code()).isEqualTo("MALFORMED_REQUEST");
+		assertThat(pong).isEqualTo(new PongFrame());
+		assertThat(otherRoomSubscribe.code()).isEqualTo("NOT_SUPPORTED");
+		assertThat(otherRoomSubscribe.threadId()).isEqualTo(otherThreadId);
+		assertThat(ownRoomUnsubscribe.code()).isEqualTo("NOT_SUPPORTED");
+		assertThat(ownRoomUnsubscribe.threadId()).isEqualTo(threadId);
+		assertThat(echo.content()).isEqualTo("after");
+		assertThat(echo.clientMsgId()).isEqualTo(clientMsgId);
+		assertThat(echo.turnId()).isEqualTo(turnId);
 	}
 
 	@Test
@@ -212,7 +254,7 @@ class CollabWebSocketHandlerTest {
 			ChatMessageFrame firstFrame = (ChatMessageFrame) objectMapper.readValue(firstReceived.get(0), WsFrame.class);
 			ChatMessageFrame secondFrame = (ChatMessageFrame) objectMapper.readValue(secondReceived.get(0), WsFrame.class);
 			assertThat(firstFrame).isEqualTo(secondFrame);
-			assertThat(firstFrame.sessionId()).isEqualTo(threadId);
+			assertThat(firstFrame.threadId()).isEqualTo(threadId);
 		} finally {
 			firstOutbound.tryEmitComplete();
 			secondOutbound.tryEmitComplete();
@@ -262,7 +304,7 @@ class CollabWebSocketHandlerTest {
 			PresenceLeaveFrame left =
 					(PresenceLeaveFrame) objectMapper.readValue(stayingReceived.get(1), WsFrame.class);
 
-			assertThat(left.sessionId()).isEqualTo(threadId);
+			assertThat(left.threadId()).isEqualTo(threadId);
 			// 방금 말하고 나간 그 사람이다.
 			assertThat(left.subject()).isEqualTo(message.from());
 		} finally {
@@ -298,7 +340,7 @@ class CollabWebSocketHandlerTest {
 				.block(WsTestTimeouts.BLOCK);
 
 		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received.get(), WsFrame.class);
-		assertThat(error.sessionId()).isEqualTo(threadId);
+		assertThat(error.threadId()).isEqualTo(threadId);
 		assertThat(error.code()).isEqualTo("FORBIDDEN");
 		// 재연결해도 같은 거부라, 프론트가 루프를 멈출 수 있게 정상 종료로 닫는다.
 		assertThat(closeStatus.get().getCode()).isEqualTo(1000);
@@ -329,7 +371,7 @@ class CollabWebSocketHandlerTest {
 				.block(WsTestTimeouts.BLOCK);
 
 		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received.get(), WsFrame.class);
-		assertThat(error.sessionId()).isNull();
+		assertThat(error.threadId()).isNull();
 		assertThat(error.code()).isEqualTo("MALFORMED_REQUEST");
 		assertThat(closeStatus.get().getCode()).isEqualTo(1000);
 	}
@@ -430,7 +472,7 @@ class CollabWebSocketHandlerTest {
 
 		assertThat(received).hasSize(2);
 		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received.get(1), WsFrame.class);
-		assertThat(error.sessionId()).isEqualTo(threadId);
+		assertThat(error.threadId()).isEqualTo(threadId);
 		assertThat(error.code()).isEqualTo("FORBIDDEN");
 	}
 
@@ -489,7 +531,7 @@ class CollabWebSocketHandlerTest {
 		remover.join(TimeUnit.SECONDS.toMillis(5));
 
 		ErrorFrame error = (ErrorFrame) objectMapper.readValue(received.get(received.size() - 1), WsFrame.class);
-		assertThat(error.sessionId()).isEqualTo(threadId);
+		assertThat(error.threadId()).isEqualTo(threadId);
 		assertThat(error.code()).isEqualTo("FORBIDDEN");
 	}
 

@@ -6,8 +6,10 @@ describe('WsFrame 유니온', () => {
   it('type 태그로 프레임을 판별할 수 있다', () => {
     const frame: WsFrame = {
       type: 'chat.answer',
-      sessionId: 's1',
+      threadId: 's1',
       msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
       seq: 1,
       delta: 'hi',
       citations: [],

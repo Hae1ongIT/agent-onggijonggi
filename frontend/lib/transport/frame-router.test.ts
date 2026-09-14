@@ -15,8 +15,10 @@ describe('routeFrame', () => {
   it('chat.answer는 onChatAnswer에게만 원본 payload로 전달된다', () => {
     const frame: ChatAnswerFrame = {
       type: 'chat.answer',
-      sessionId: 's1',
+      threadId: 's1',
       msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
       seq: 1,
       delta: '안녕',
       citations: [],
@@ -33,8 +35,10 @@ describe('routeFrame', () => {
   it('chat.message를 라우팅한다', () => {
     const frame: ChatMessageFrame = {
       type: 'chat.message',
-      sessionId: 's1',
+      threadId: 's1',
       msgId: 'msg-1',
+      clientMsgId: null,
+      turnId: null,
       seq: 1,
       from: 'u1',
       fromDisplayName: '보낸 사람',
@@ -48,7 +52,7 @@ describe('routeFrame', () => {
   it('presence.join을 라우팅한다', () => {
     const frame: PresenceJoinFrame = {
       type: 'presence.join',
-      sessionId: 's1',
+      threadId: 's1',
       subject: 'u1',
       displayName: '들어온 사람',
     };
@@ -60,7 +64,7 @@ describe('routeFrame', () => {
   it('presence.leave를 라우팅한다', () => {
     const frame: PresenceLeaveFrame = {
       type: 'presence.leave',
-      sessionId: 's1',
+      threadId: 's1',
       subject: 'u1',
       displayName: '들어온 사람',
     };
@@ -72,7 +76,7 @@ describe('routeFrame', () => {
   it('presence.snapshot을 라우팅한다', () => {
     const frame: PresenceSnapshotFrame = {
       type: 'presence.snapshot',
-      sessionId: 's1',
+      threadId: 's1',
       participants: [{ subject: 'u1', displayName: 'u1 님' }],
     };
     const onPresenceSnapshot = vi.fn();
@@ -83,7 +87,7 @@ describe('routeFrame', () => {
   it('error를 라우팅한다', () => {
     const frame: WsErrorFrame = {
       type: 'error',
-      sessionId: null,
+      threadId: null,
       code: 'UNAUTHENTICATED',
       message: '인증이 필요합니다.',
       traceId: 't1',
@@ -96,8 +100,10 @@ describe('routeFrame', () => {
   it('해당 타입 핸들러를 안 넘겨도 예외 없이 조용히 무시한다', () => {
     const frame: ChatAnswerFrame = {
       type: 'chat.answer',
-      sessionId: 's1',
+      threadId: 's1',
       msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
       seq: 1,
       delta: 'x',
       citations: [],
@@ -110,8 +116,10 @@ describe('routeFrame', () => {
   it('handlers가 여러 타입을 갖고 있어도 해당 프레임의 핸들러만 호출된다', () => {
     const frame: ChatAnswerFrame = {
       type: 'chat.answer',
-      sessionId: 's1',
+      threadId: 's1',
       msgId: 'msg-1',
+      turnId: null,
+      model: 'm',
       seq: 1,
       delta: '',
       citations: [],
@@ -132,7 +140,7 @@ describe('routeFrame — system.notice(#29)', () => {
   it('system.notice는 onSystemNotice에게만 원본 payload로 전달된다', () => {
     const frame: SystemNoticeFrame = {
       type: 'system.notice',
-      sessionId: 's1',
+      threadId: 's1',
       severity: 'warning',
       code: 'RISKY_CONTENT',
       message: '검토가 필요한 내용이 감지되었습니다.',
@@ -147,7 +155,7 @@ describe('routeFrame — system.notice(#29)', () => {
   it('participant.changed를 onParticipantChanged로 보낸다', () => {
     const frame: WsFrame = {
       type: 'participant.changed',
-      sessionId: 'room-1',
+      threadId: 'room-1',
       action: 'INVITE_PENDING',
       subject: 'sub-1',
       displayName: '아직 로그인 전',
@@ -159,4 +167,22 @@ describe('routeFrame — system.notice(#29)', () => {
     expect(onParticipantChanged).toHaveBeenCalledWith(frame);
   });
 
+  it('chat.queued를 onChatQueued로, pong을 onPong으로 보낸다(이슈 #160)', () => {
+    const queued: WsFrame = {
+      type: 'chat.queued',
+      threadId: 'room-1',
+      turnId: 't1',
+      status: 'queued',
+    };
+    const onChatQueued = vi.fn();
+    const onPong = vi.fn();
+    const onError = vi.fn();
+
+    routeFrame(queued, { onChatQueued, onPong, onError });
+    routeFrame({ type: 'pong' }, { onChatQueued, onPong, onError });
+
+    expect(onChatQueued).toHaveBeenCalledExactlyOnceWith(queued);
+    expect(onPong).toHaveBeenCalledExactlyOnceWith({ type: 'pong' });
+    expect(onError).not.toHaveBeenCalled();
+  });
 });
