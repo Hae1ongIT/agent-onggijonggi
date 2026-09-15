@@ -87,14 +87,14 @@ public class PersistingChatStreamService implements ChatStreamService {
 		return delegate.streamChat(request)
 				.doOnNext(buffer::append)
 				.doOnComplete(() -> turn.ifPresent(storedTurn ->
-						persistAssistantReply(storedTurn.agentMessageId(), buffer.toString())));
+						persistAssistantReply(storedTurn, buffer.toString())));
 	}
 
 	/** 응답 저장 실패는 이미 시작한 HTTP 응답을 깨지 않도록 별도 boundedElastic 체인에서 기록만 한다. */
-	private void persistAssistantReply(UUID agentMessageId, String content) {
-		Mono.fromRunnable(() -> directChatTurnService.completeAgentReplyBlocking(agentMessageId, content))
+	private void persistAssistantReply(DirectChatTurnService.StoredTurn turn, String content) {
+		Mono.fromRunnable(() -> directChatTurnService.persistCompletedAgentReplyBlocking(turn, content))
 				.subscribeOn(Schedulers.boundedElastic())
-				.doOnError(error -> log.error("1:1 assistant 저장 실패. agentMessageId={}", agentMessageId, error))
+				.doOnError(error -> log.error("1:1 assistant 저장 실패. agentMessageId={}", turn.agentMessageId(), error))
 				.onErrorComplete()
 				.subscribe();
 	}

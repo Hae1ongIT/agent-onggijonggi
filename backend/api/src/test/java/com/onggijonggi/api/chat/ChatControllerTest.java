@@ -573,6 +573,39 @@ class ChatControllerTest {
 				.jsonPath("$.error.code").isEqualTo("VALIDATION_ERROR");
 	}
 
+	@Test
+	void rejectsStreamWithoutMessagesAsValidationError() {
+		assertInvalidMessages("""
+				{
+				  "sessionId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+				  "modelId": "test-model"
+				}
+				""");
+	}
+
+	@Test
+	void rejectsStreamWithNullMessagesAsValidationError() {
+		assertInvalidMessages("""
+				{
+				  "sessionId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+				  "modelId": "test-model",
+				  "messages": null
+				}
+				""");
+	}
+
+	private void assertInvalidMessages(String requestBody) {
+		restTestClient.post()
+				.uri("/api/chat/stream")
+				.contentType(MediaType.APPLICATION_JSON)
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt("invalid-messages", List.of("USER")))
+				.body(requestBody)
+				.exchange()
+				.expectStatus().isBadRequest()
+				.expectBody()
+				.jsonPath("$.error.code").isEqualTo("VALIDATION_ERROR");
+	}
+
 	private void sendChatMessage(String sessionId, String subject, String content) {
 		String requestBody = """
 				{

@@ -51,11 +51,8 @@ public class DirectChatTurnService {
 	}
 
 	@Transactional
-	public void completeAgentReplyBlocking(UUID agentMessageId, String content) {
-		msgRepository.findById(agentMessageId).ifPresent(message -> {
-			message.complete(content);
-			msgRepository.save(message);
-		});
+	public void persistCompletedAgentReplyBlocking(StoredTurn turn, String content) {
+		msgRepository.save(Msg.completedAgent(turn.agentMessageId(), turn.threadId(), turn.agentSeq(), content));
 	}
 
 	private StoredTurn create(UUID threadId, UUID userId, String content, String title) {
@@ -76,9 +73,7 @@ public class DirectChatTurnService {
 	private StoredTurn persistTurn(Thr thread, ThrMbr owner, String content) {
 		long firstSeq = thread.reserveSeqBlock(2);
 		msgRepository.save(Msg.human(UUID.randomUUID(), thread.getId(), firstSeq, owner.getId(), content));
-		UUID agentMessageId = UUID.randomUUID();
-		msgRepository.save(Msg.pendingAgent(agentMessageId, thread.getId(), firstSeq + 1));
-		return new StoredTurn(agentMessageId);
+		return new StoredTurn(UUID.randomUUID(), thread.getId(), firstSeq + 1);
 	}
 
 	private static ResponseStatusException notFound() {
@@ -86,7 +81,7 @@ public class DirectChatTurnService {
 	}
 
 	/** 스트림 완료 시 어느 PENDING AGENT 메시지를 COMPLETE로 닫을지 caller에게 전달한다. */
-	public record StoredTurn(UUID agentMessageId) {
+	public record StoredTurn(UUID agentMessageId, UUID threadId, long agentSeq) {
 	}
 
 }

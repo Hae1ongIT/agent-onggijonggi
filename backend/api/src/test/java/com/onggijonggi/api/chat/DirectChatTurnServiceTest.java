@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrKind;
@@ -49,7 +50,7 @@ class DirectChatTurnServiceTest {
 	}
 
 	@Test
-	void createsDirectThreadOwnerAndHumanAgentSequencePair() {
+	void createsDirectThreadOwnerAndHumanMessageAndReservesAgentSequence() {
 		UUID threadId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
 		when(thrRepository.findByIdForSeqUpdate(threadId)).thenReturn(Optional.empty());
@@ -71,10 +72,11 @@ class DirectChatTurnServiceTest {
 		assertThat(owner.getValue().getStatus()).isEqualTo(ThrMbrStatus.ACTIVE);
 
 		ArgumentCaptor<Msg> messages = ArgumentCaptor.forClass(Msg.class);
-		verify(msgRepository, org.mockito.Mockito.times(2)).save(messages.capture());
-		assertThat(messages.getAllValues()).extracting(Msg::getSeq).containsExactly(0L, 1L);
+		verify(msgRepository).save(messages.capture());
+		assertThat(messages.getAllValues()).extracting(Msg::getSeq).containsExactly(0L);
 		assertThat(messages.getAllValues()).extracting(Msg::getThrId).containsOnly(threadId);
-		assertThat(messages.getAllValues().get(1).getId()).isEqualTo(turn.agentMessageId());
+		assertThat(turn.threadId()).isEqualTo(threadId);
+		assertThat(turn.agentSeq()).isEqualTo(1L);
 	}
 
 	@Test
@@ -88,6 +90,24 @@ class DirectChatTurnServiceTest {
 		assertThatThrownBy(() -> service.prepareExistingBlocking(threadId, actorId, "안녕"))
 				.isInstanceOfSatisfying(ResponseStatusException.class,
 						status -> assertThat(status.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND));
+	}
+
+	@Test
+	void persistsCompletedAgentAtTheReservedSequenceOnlyAfterStreamCompletion() {
+		UUID agentMessageId = UUID.randomUUID();
+		UUID threadId = UUID.randomUUID();
+		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(agentMessageId, threadId, 7L);
+		when(msgRepository.save(any(Msg.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+		service.persistCompletedAgentReplyBlocking(turn, "완료된 응답");
+
+		ArgumentCaptor<Msg> message = ArgumentCaptor.forClass(Msg.class);
+		verify(msgRepository).save(message.capture());
+		assertThat(message.getValue().getId()).isEqualTo(agentMessageId);
+		assertThat(message.getValue().getThrId()).isEqualTo(threadId);
+		assertThat(message.getValue().getSeq()).isEqualTo(7L);
+		assertThat(message.getValue().getAthKind()).isEqualTo(AthKind.AGENT);
+		assertThat(message.getValue().getContent()).isEqualTo("완료된 응답");
 	}
 
 }

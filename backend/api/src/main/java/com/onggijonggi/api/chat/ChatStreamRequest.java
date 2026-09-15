@@ -27,6 +27,6 @@ public record ChatStreamRequest(
 	/** HTTP 1:1 저장은 마지막 입력만 HUMAN으로 기록하므로 마지막 role은 user여야 한다. */
 	@AssertTrue(message = "마지막 메시지의 role은 user여야 합니다.")
 	public boolean hasUserLastMessage() {
-		return !messages.isEmpty() && "user".equals(messages.get(messages.size() - 1).role());
+		return messages != null && !messages.isEmpty() && "user".equals(messages.get(messages.size() - 1).role());
 	}
 }

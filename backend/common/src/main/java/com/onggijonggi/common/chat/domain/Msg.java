@@ -88,6 +88,11 @@ public class Msg {
 		return new Msg(id, thrId, seq, AthKind.AGENT, null, MsgStatus.PENDING, "");
 	}
 
+	/** HTTP 1:1 응답은 스트림이 정상 완료된 뒤에만 COMPLETE AGENT 행으로 저장한다. */
+	public static Msg completedAgent(UUID id, UUID thrId, long seq, String content) {
+		return new Msg(id, thrId, seq, AthKind.AGENT, null, MsgStatus.COMPLETE, content);
+	}
+
 	/** SYSTEM 메시지는 HUMAN과 같이 쓰이는 순간 이미 완료된 메시지다 — 작성자가 없어 thrMbrId는 두지 않는다. */
 	public static Msg system(UUID thrId, long seq, String content) {
 		return new Msg(UUID.randomUUID(), thrId, seq, AthKind.SYSTEM, null, MsgStatus.COMPLETE, content);
