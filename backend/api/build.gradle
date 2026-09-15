@@ -48,6 +48,14 @@ tasks.register('verifyFlywayMigrations', JavaExec) {
 	mainClass = 'com.onggijonggi.api.migration.FlywayMigrationVerifier'
 }
 
+tasks.register('verifyDirectChatMigrationFixture', JavaExec) {
+	group = 'verification'
+	description = 'Verifies the legacy direct-chat migration against PostgreSQL fixtures.'
+	dependsOn testClasses
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.onggijonggi.api.migration.DirectChatMigrationFixtureVerifier'
+}
+
 tasks.register('verifyHibernateMapping', JavaExec) {
 	group = 'verification'
 	description = 'Validates that JPA entity mappings match the PostgreSQL schema Flyway applied.'
