@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.common.chat.domain.ChatSess;
+import com.onggijonggi.common.chat.domain.Thr;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -21,6 +22,10 @@ public record ChatSessSummary(
 
 	static ChatSessSummary from(ChatSess sess) {
 		return new ChatSessSummary(sess.getId(), sess.getTitle(), sess.getCreatedAt(), sess.getUpdatedAt());
+	}
+
+	static ChatSessSummary from(Thr thread) {
+		return new ChatSessSummary(thread.getId(), thread.getTitle(), thread.getCreatedAt(), thread.getUpdatedAt());
 	}
 
 }

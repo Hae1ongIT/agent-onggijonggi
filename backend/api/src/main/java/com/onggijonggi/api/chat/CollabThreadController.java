@@ -34,7 +34,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
@@ -326,13 +325,30 @@ public class CollabThreadController {
 		return currentActorProvider.currentActor()
 				.map(CurrentActor::userId)
 				.flatMap(userId -> threadMembershipService.isActiveCollabParticipant(threadId, userId))
-				.flatMap(participant -> participant
-						? Mono.just(true)
-						: Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND)))
-				.then(Mono.fromCallable(() -> afterSeq == null
-								? msgRepository.findByThrIdOrderBySeqAsc(threadId)
-								: msgRepository.findByThrIdAndSeqGreaterThanOrderBySeqAsc(threadId, afterSeq))
-						.subscribeOn(Schedulers.boundedElastic()))
+				.flatMapMany(participant -> listMessagesForParticipant(threadId, afterSeq, participant));
+	}
+
+	/** DIRECT·COLLAB ACTIVE 참가자가 공통 msg 이력을 raw athKind 계약으로 읽는 새 경로다. */
+	@GetMapping("/api/threads/{threadId}/messages")
+	public Flux<MsgItem> listThreadMessages(@PathVariable UUID threadId,
+			@RequestParam(name = "afterSeq", required = false) Long afterSeq) {
+		return currentActorProvider.currentActor()
+				.map(CurrentActor::userId)
+				.flatMap(userId -> threadMembershipService.isActiveParticipant(threadId, userId))
+				.flatMapMany(participant -> listMessagesForParticipant(threadId, afterSeq, participant));
+	}
+
+	private Flux<MsgItem> listMessagesForParticipant(UUID threadId, Long afterSeq, boolean participant) {
+		if (!participant) {
+			return Flux.error(new ResponseStatusException(HttpStatus.NOT_FOUND));
+		}
+		if (afterSeq != null && afterSeq < 0) {
+			return Flux.error(new ResponseStatusException(HttpStatus.BAD_REQUEST));
+		}
+		return Mono.fromCallable(() -> afterSeq == null
+						? msgRepository.findByThrIdOrderBySeqAsc(threadId)
+						: msgRepository.findByThrIdAndSeqGreaterThanOrderBySeqAsc(threadId, afterSeq))
+				.subscribeOn(Schedulers.boundedElastic())
 				.flatMap(this::withAuthorDisplayNames)
 				.flatMapMany(Flux::fromIterable);
 	}

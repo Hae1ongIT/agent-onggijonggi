@@ -492,6 +492,87 @@ class ChatControllerTest {
 	}
 
 	/** 조회 테스트용으로 세션·메시지를 미리 만들어 두기 위한 헬퍼. */
+	@Test
+	void readsDirectHistoryFromTheCommonThreadEndpoint() {
+		String sessionId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+		String subject = "common-history-user";
+		sendChatMessage(sessionId, subject, "common history");
+		String token = "Bearer " + TestJwtSupport.signedJwt(subject, List.of("USER"));
+
+		restTestClient.get()
+				.uri("/api/threads/{threadId}/messages?afterSeq=-1", sessionId)
+				.header(HttpHeaders.AUTHORIZATION, token)
+				.exchange()
+				.expectStatus().isBadRequest();
+
+		restTestClient.get()
+				.uri("/api/threads/{threadId}/messages", sessionId)
+				.header(HttpHeaders.AUTHORIZATION, token)
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody()
+				.jsonPath("$[0].athKind").isEqualTo("HUMAN")
+				.jsonPath("$[0].content").isEqualTo("common history");
+	}
+
+	@Test
+	void renamesAndDeletesDirectThreadThroughTheCommonLifecyclePaths() {
+		String sessionId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+		String subject = "common-lifecycle-user";
+		sendChatMessage(sessionId, subject, "common lifecycle");
+		String token = "Bearer " + TestJwtSupport.signedJwt(subject, List.of("USER"));
+
+		restTestClient.patch()
+				.uri("/api/threads/{threadId}", sessionId)
+				.contentType(MediaType.APPLICATION_JSON)
+				.header(HttpHeaders.AUTHORIZATION, token)
+				.body("{ \"title\": \"  new title  \" }")
+				.exchange()
+				.expectStatus().isNoContent();
+
+		restTestClient.get()
+				.uri("/api/chat/sessions")
+				.header(HttpHeaders.AUTHORIZATION, token)
+				.exchange()
+				.expectStatus().isOk()
+				.expectBody(String.class)
+				.value(body -> assertThat(body).contains("new title").doesNotContain("  new title  "));
+
+		restTestClient.delete()
+				.uri("/api/threads/{threadId}", sessionId)
+				.header(HttpHeaders.AUTHORIZATION, token)
+				.exchange()
+				.expectStatus().isNoContent();
+
+		restTestClient.get()
+				.uri("/api/chat/sessions/{sessionId}/messages", sessionId)
+				.header(HttpHeaders.AUTHORIZATION, token)
+				.exchange()
+				.expectStatus().isNotFound();
+	}
+
+	@Test
+	void rejectsStreamWhoseLastMessageIsNotUser() {
+		String subject = "invalid-last-role-user";
+		String requestBody = """
+				{
+				  "sessionId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+				  "modelId": "test-model",
+				  "messages": [ { "role": "assistant", "content": "not a turn" } ]
+				}
+				""";
+
+		restTestClient.post()
+				.uri("/api/chat/stream")
+				.contentType(MediaType.APPLICATION_JSON)
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwtSupport.signedJwt(subject, List.of("USER")))
+				.body(requestBody)
+				.exchange()
+				.expectStatus().isBadRequest()
+				.expectBody()
+				.jsonPath("$.error.code").isEqualTo("VALIDATION_ERROR");
+	}
+
 	private void sendChatMessage(String sessionId, String subject, String content) {
 		String requestBody = """
 				{

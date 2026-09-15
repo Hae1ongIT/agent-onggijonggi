@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.common.chat.domain.ChatMsg;
+import com.onggijonggi.common.chat.domain.Msg;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -21,6 +22,14 @@ public record ChatMsgItem(
 
 	static ChatMsgItem from(ChatMsg msg) {
 		return new ChatMsgItem(msg.getId(), msg.getRole(), msg.getContent(), msg.getCreatedAt());
+	}
+
+	static ChatMsgItem from(Msg msg) {
+		return new ChatMsgItem(msg.getId(), switch (msg.getAthKind()) {
+			case HUMAN -> "user";
+			case AGENT -> "assistant";
+			case SYSTEM -> "system";
+		}, msg.getContent(), msg.getCreatedAt());
 	}
 
 }

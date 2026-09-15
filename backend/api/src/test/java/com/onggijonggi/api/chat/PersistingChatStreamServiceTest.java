@@ -1,7 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -9,27 +9,24 @@ import static org.mockito.Mockito.when;
 
 import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.auth.CurrentActorProvider;
-import com.onggijonggi.common.chat.domain.ChatSess;
-import com.onggijonggi.common.chat.persistence.ChatMsgRepository;
-import com.onggijonggi.common.chat.persistence.ChatSessRepository;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 /**
  * Class Name : PersistingChatStreamServiceTest.java
- * Description : PersistingChatStreamService 데코레이터의 오케스트레이션(프로비저닝→세션/메시지 저장→
- *               LLM 위임→assistant 저장, 저장 실패 시 채팅은 그대로 진행)을 순수 단위 테스트로 검증한다.
- *               Spring 컨텍스트·실 DB 없이 전 의존성을 Mockito로 대체한다. 인증된 요청자는
- *               CurrentActorProvider 스텁이 그대로 돌려주므로 리액터 Context에 JWT를 주입할 필요가 없다.
+ * Description : HTTP 1:1 스트림이 DIRECT turn 저장·응답 AGENT 완료를 연결하고, 404는 LLM 호출 전에
+ *               전파하며 내부 저장 오류는 기존 text stream을 막지 않는지 검증한다.
  */
 @ExtendWith(MockitoExtension.class)
 class PersistingChatStreamServiceTest {
@@ -39,88 +36,91 @@ class PersistingChatStreamServiceTest {
 	@Mock
 	private CurrentActorProvider currentActorProvider;
 	@Mock
-	private ChatSessRepository chatSessRepository;
-	@Mock
-	private ChatMsgRepository chatMsgRepository;
+	private DirectChatTurnService directChatTurnService;
 
 	private PersistingChatStreamService service;
 
 	@BeforeEach
 	void setUp() {
-		service = new PersistingChatStreamService(delegate, currentActorProvider, chatSessRepository, chatMsgRepository);
+		service = new PersistingChatStreamService(delegate, currentActorProvider, directChatTurnService);
 	}
 
 	@Test
-	void persistsUserAndAssistantMessagesAroundStream() {
+	void persistsDirectTurnAndCompletesItsPendingAgentMessage() {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
-		ChatStreamRequest request = new ChatStreamRequest(sessionId, "gemma", List.of(new ChatMessage("user", "안녕")));
-
+		UUID agentMessageId = UUID.randomUUID();
+		ChatStreamRequest request = request(sessionId, " 안녕 ");
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
-		when(chatSessRepository.findById(sessionId)).thenReturn(Optional.empty());
+		when(directChatTurnService.prepareOrCreateBlocking(eq(sessionId), eq(userId), eq(" 안녕 "), eq("안녕")))
+				.thenReturn(new DirectChatTurnService.StoredTurn(agentMessageId));
 		when(delegate.streamChat(request)).thenReturn(Flux.just("hi", " there"));
 
 		StepVerifier.create(service.streamChat(request))
 				.expectNext("hi", " there")
 				.verifyComplete();
 
-		verify(chatSessRepository).save(argThat(sess -> sess.getId().equals(sessionId) && sess.getUserId().equals(userId)));
-		verify(chatMsgRepository).save(argThat(msg -> "user".equals(msg.getRole()) && "안녕".equals(msg.getContent())));
-		verify(chatMsgRepository, timeout(1000))
-				.save(argThat(msg -> "assistant".equals(msg.getRole()) && "hi there".equals(msg.getContent())));
+		verify(directChatTurnService, timeout(1000)).completeAgentReplyBlocking(agentMessageId, "hi there");
 	}
 
 	@Test
-	void reusesExistingSessionWithoutCreatingNewRow() {
+	void doesNotCallLlmWhenDirectThreadIsNotOwnedByTheActor() {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
-		ChatStreamRequest request = new ChatStreamRequest(sessionId, "gemma", List.of(new ChatMessage("user", "또 물어봄")));
-
+		ChatStreamRequest request = request(sessionId, "안녕");
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
-		when(chatSessRepository.findById(sessionId)).thenReturn(Optional.of(new ChatSess(sessionId, userId, "또 물어봄")));
-		when(delegate.streamChat(request)).thenReturn(Flux.just("ok"));
+		when(directChatTurnService.prepareOrCreateBlocking(any(), any(), any(), any()))
+				.thenThrow(new ResponseStatusException(HttpStatus.NOT_FOUND));
 
 		StepVerifier.create(service.streamChat(request))
-				.expectNext("ok")
-				.verifyComplete();
+				.expectErrorSatisfies(error -> {
+					ResponseStatusException status = (ResponseStatusException) error;
+					org.assertj.core.api.Assertions.assertThat(status.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+				})
+				.verify();
 
-		verify(chatSessRepository, never()).save(any());
+		verify(delegate, never()).streamChat(any());
 	}
 
 	@Test
-	void skipsPersistingWhenSessionOwnedByAnotherUser() {
+	void continuesStreamingWhenDirectStorageFailsInternally() {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
-		UUID otherUserId = UUID.randomUUID();
-		ChatStreamRequest request = new ChatStreamRequest(sessionId, "gemma", List.of(new ChatMessage("user", "남의 세션에 끼어들기")));
-
+		ChatStreamRequest request = request(sessionId, "안녕");
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
-		when(chatSessRepository.findById(sessionId)).thenReturn(Optional.of(new ChatSess(sessionId, otherUserId, "원래 제목")));
-		when(delegate.streamChat(request)).thenReturn(Flux.just("ok"));
+		when(directChatTurnService.prepareOrCreateBlocking(any(), any(), any(), any()))
+				.thenThrow(new IllegalStateException("database unavailable"));
+		when(delegate.streamChat(request)).thenReturn(Flux.just("reply"));
 
 		StepVerifier.create(service.streamChat(request))
-				.expectNext("ok")
+				.expectNext("reply")
 				.verifyComplete();
 
-		verify(chatSessRepository, never()).save(any());
-		verify(chatMsgRepository, never()).save(any());
+		verify(directChatTurnService, never()).completeAgentReplyBlocking(any(), any());
 	}
 
 	@Test
-	void streamsNormallyEvenWhenProvisioningFails() {
+	void retriesTheExistingDirectThreadAfterCreateIdCollision() {
 		UUID sessionId = UUID.randomUUID();
-		ChatStreamRequest request = new ChatStreamRequest(sessionId, "gemma", List.of(new ChatMessage("user", "안녕")));
-
-		when(currentActorProvider.currentActor()).thenReturn(Mono.error(new RuntimeException("db down")));
-		when(delegate.streamChat(request)).thenReturn(Flux.just("hi"));
+		UUID userId = UUID.randomUUID();
+		UUID agentMessageId = UUID.randomUUID();
+		ChatStreamRequest request = request(sessionId, "안녕");
+		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
+		when(directChatTurnService.prepareOrCreateBlocking(any(), any(), any(), any()))
+				.thenThrow(new org.springframework.dao.DataIntegrityViolationException("duplicate"));
+		when(directChatTurnService.prepareExistingBlocking(sessionId, userId, "안녕"))
+				.thenReturn(new DirectChatTurnService.StoredTurn(agentMessageId));
+		when(delegate.streamChat(request)).thenReturn(Flux.just("reply"));
 
 		StepVerifier.create(service.streamChat(request))
-				.expectNext("hi")
+				.expectNext("reply")
 				.verifyComplete();
 
-		verify(chatSessRepository, never()).save(any());
-		verify(chatMsgRepository, never()).save(argThat(msg -> "user".equals(msg.getRole())));
-		verify(chatMsgRepository, timeout(1000)).save(argThat(msg -> "assistant".equals(msg.getRole())));
+		verify(directChatTurnService).prepareExistingBlocking(sessionId, userId, "안녕");
+	}
+
+	private ChatStreamRequest request(UUID sessionId, String content) {
+		return new ChatStreamRequest(sessionId, "gemma", List.of(new ChatMessage("user", content)));
 	}
 
 }

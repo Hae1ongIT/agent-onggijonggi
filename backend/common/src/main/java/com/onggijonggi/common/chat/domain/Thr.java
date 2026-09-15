@@ -152,6 +152,12 @@ public class Thr {
 		this.updatedAt = Instant.now();
 	}
 
+	/** DIRECT 제목 수정은 소유권을 검증한 서비스만 호출한다. 유효한 제목은 앞뒤 공백을 제거해 저장한다. */
+	public void rename(String title) {
+		this.title = title;
+		this.updatedAt = Instant.now();
+	}
+
 
 	/**
 	* seq를 size개 예약하고 블록의 첫 seq를 돌려준다(이슈 #190). 호출부가 비관적 잠금으로 이 행을

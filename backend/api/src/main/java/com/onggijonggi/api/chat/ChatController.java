@@ -2,9 +2,12 @@ package com.onggijonggi.api.chat;
 
 import com.onggijonggi.api.auth.CurrentActor;
 import com.onggijonggi.api.auth.CurrentActorProvider;
-import com.onggijonggi.common.chat.domain.ChatSess;
-import com.onggijonggi.common.chat.persistence.ChatMsgRepository;
-import com.onggijonggi.common.chat.persistence.ChatSessRepository;
+import com.onggijonggi.common.chat.domain.Thr;
+import com.onggijonggi.common.chat.domain.ThrKind;
+import com.onggijonggi.common.chat.domain.ThrMbrStatus;
+import com.onggijonggi.common.chat.persistence.MsgRepository;
+import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
+import com.onggijonggi.common.chat.persistence.ThrRepository;
 import jakarta.validation.Valid;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -24,31 +27,29 @@ import reactor.core.scheduler.Schedulers;
 
 /**
  * Class Name : ChatController.java
- * Description : 01·CLIENT ↔ 03·CORE 채팅 스트리밍·이력 조회 계약 구현체.
- *               02·EDGE(SecurityConfig)가 JWT 인증·hasRole("USER")를 필터체인에서 이미 강제한다.
+ * Description : 개인 채팅 HTTP 스트림과 #164 전까지의 레거시 세션 별칭이다. 외부 URL·text/plain
+ *               응답·ChatSessSummary/ChatMsgItem 모양은 유지하되, 읽기·이름변경·삭제의 정본은
+ *               DIRECT thr/msg다. Thread 종류와 소유권은 항상 404로 감춘다.
  */
 @RestController
 public class ChatController {
 
 	private final ChatStreamService chatStreamService;
-
-	private final ChatSessRepository chatSessRepository;
-	private final ChatMsgRepository chatMsgRepository;
+	private final ThrRepository thrRepository;
+	private final ThrMbrRepository thrMbrRepository;
+	private final MsgRepository msgRepository;
 	private final CurrentActorProvider currentActorProvider;
 
-	public ChatController(ChatStreamService chatStreamService, ChatSessRepository chatSessRepository,
-			ChatMsgRepository chatMsgRepository, CurrentActorProvider currentActorProvider) {
+	public ChatController(ChatStreamService chatStreamService, ThrRepository thrRepository,
+			ThrMbrRepository thrMbrRepository, MsgRepository msgRepository, CurrentActorProvider currentActorProvider) {
 		this.chatStreamService = chatStreamService;
-		this.chatSessRepository = chatSessRepository;
-		this.chatMsgRepository = chatMsgRepository;
+		this.thrRepository = thrRepository;
+		this.thrMbrRepository = thrMbrRepository;
+		this.msgRepository = msgRepository;
 		this.currentActorProvider = currentActorProvider;
 	}
 
-	/**
-	* Content-Type을 text/event-stream이 아닌 text/plain으로 고정한다. text/event-stream을 쓰면
-	* Spring이 Flux<String>을 "data:<chunk>\n\n" SSE 프레이밍으로 자동으로 감싸는데, 클라이언트
-	* useChat의 streamProtocol:'text'는 이 프레이밍을 파싱하지 않아 화면에 접두사가 그대로 노출된다.
-	*/
+	/** Stream protocol은 기존 프론트 useChat의 streamProtocol:text 호환을 위해 text/plain으로 유지한다. */
 	@PostMapping(value = "/api/chat/stream", produces = MediaType.TEXT_PLAIN_VALUE + ";charset=UTF-8")
 	public Flux<String> streamChat(@Valid @RequestBody ChatStreamRequest request) {
 		return chatStreamService.streamChat(request);
@@ -58,32 +59,30 @@ public class ChatController {
 	public Flux<ChatSessSummary> listSessions() {
 		return currentUserId()
 				.flatMap(userId -> Mono
-						.fromCallable(() -> chatSessRepository.findByUserIdOrderByCreatedAtDesc(userId))
+						.fromCallable(() -> thrRepository.findByKindAndDrcOwnUserIdOrderByCreatedAtDesc(ThrKind.DIRECT, userId))
 						.subscribeOn(Schedulers.boundedElastic()))
 				.flatMapMany(Flux::fromIterable)
 				.map(ChatSessSummary::from);
 	}
 
-	/** 본인 소유가 아니거나 존재하지 않는 세션이면 404 — 타인 세션의 존재 여부를 노출하지 않는다. */
 	@GetMapping("/api/chat/sessions/{sessionId}/messages")
 	public Flux<ChatMsgItem> listMessages(@PathVariable UUID sessionId) {
 		return currentUserId()
-				.flatMap(userId -> findOwnedSessionOrNotFound(sessionId, userId))
-				.flatMap(sess -> Mono
-						.fromCallable(() -> chatMsgRepository.findBySessIdOrderByCreatedAtAsc(sessionId))
+				.flatMap(userId -> findOwnedDirectThreadOrNotFound(sessionId, userId))
+				.flatMap(thread -> Mono
+						.fromCallable(() -> msgRepository.findByThrIdOrderBySeqAsc(thread.getId()))
 						.subscribeOn(Schedulers.boundedElastic()))
 				.flatMapMany(Flux::fromIterable)
 				.map(ChatMsgItem::from);
 	}
 
-	/** chat_msg는 FK on delete cascade로 DB가 함께 지운다(V2__chat_and_audit.sql). */
+	/** DIRECT Thread 삭제는 thr_mbr/msg FK cascade로 이력까지 함께 제거한다. */
 	@DeleteMapping("/api/chat/sessions/{sessionId}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
 	public Mono<Void> deleteSession(@PathVariable UUID sessionId) {
 		return currentUserId()
-				.flatMap(userId -> findOwnedSessionOrNotFound(sessionId, userId))
-				.flatMap(sess -> Mono
-						.fromRunnable(() -> chatSessRepository.delete(sess))
+				.flatMap(userId -> findOwnedDirectThreadOrNotFound(sessionId, userId))
+				.flatMap(thread -> Mono.fromRunnable(() -> thrRepository.delete(thread))
 						.subscribeOn(Schedulers.boundedElastic()))
 				.then();
 	}
@@ -92,24 +91,48 @@ public class ChatController {
 	public Mono<ChatSessSummary> renameSession(@PathVariable UUID sessionId,
 			@Valid @RequestBody RenameSessionRequest request) {
 		return currentUserId()
-				.flatMap(userId -> findOwnedSessionOrNotFound(sessionId, userId))
-				.flatMap(sess -> Mono.fromCallable(() -> {
-							sess.setTitle(request.title());
-							return chatSessRepository.save(sess);
-						})
-						.subscribeOn(Schedulers.boundedElastic()))
+				.flatMap(userId -> renameOwnedDirectThread(sessionId, userId, request.title()))
 				.map(ChatSessSummary::from);
 	}
 
-	/** listMessages와 동일한 소유권 검증 패턴을 delete/rename에서도 재사용한다. */
-	private Mono<ChatSess> findOwnedSessionOrNotFound(UUID sessionId, UUID userId) {
-		return Mono.fromCallable(() -> chatSessRepository.findByIdAndUserId(sessionId, userId))
+	/** 새 공용 lifecycle 경로는 DIRECT만 허용하고 성공 시 본문 없이 204를 반환한다. */
+	@PatchMapping("/api/threads/{threadId}")
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public Mono<Void> renameThread(@PathVariable UUID threadId, @Valid @RequestBody RenameSessionRequest request) {
+		return currentUserId()
+				.flatMap(userId -> renameOwnedDirectThread(threadId, userId, request.title()))
+				.then();
+	}
+
+	@DeleteMapping("/api/threads/{threadId}")
+	@ResponseStatus(HttpStatus.NO_CONTENT)
+	public Mono<Void> deleteThread(@PathVariable UUID threadId) {
+		return currentUserId()
+				.flatMap(userId -> findOwnedDirectThreadOrNotFound(threadId, userId))
+				.flatMap(thread -> Mono.fromRunnable(() -> thrRepository.delete(thread))
+						.subscribeOn(Schedulers.boundedElastic()))
+				.then();
+	}
+
+	private Mono<Thr> renameOwnedDirectThread(UUID threadId, UUID userId, String title) {
+		return findOwnedDirectThreadOrNotFound(threadId, userId)
+				.flatMap(thread -> Mono.fromCallable(() -> {
+					thread.rename(title.trim());
+					return thrRepository.save(thread);
+				}).subscribeOn(Schedulers.boundedElastic()));
+	}
+
+	/** DIRECT가 아니거나 소유자 ACTIVE OWNER가 아니면 404로 통일해 종류·존재를 숨긴다. */
+	private Mono<Thr> findOwnedDirectThreadOrNotFound(UUID sessionId, UUID userId) {
+		return Mono.fromCallable(() -> thrRepository.findById(sessionId)
+					.filter(thread -> thread.getKind() == ThrKind.DIRECT && userId.equals(thread.getDrcOwnUserId()))
+					.filter(thread -> thrMbrRepository.existsByThrIdAndUserIdAndStatus(sessionId, userId,
+							ThrMbrStatus.ACTIVE)))
 				.subscribeOn(Schedulers.boundedElastic())
 				.flatMap(Mono::justOrEmpty)
 				.switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND)));
 	}
 
-	/** 소유권 검사에 쓰는 것은 app_user.id뿐이라 CurrentActor에서 그 값만 꺼낸다. */
 	private Mono<UUID> currentUserId() {
 		return currentActorProvider.currentActor().map(CurrentActor::userId);
 	}
