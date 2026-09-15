@@ -370,6 +370,21 @@ class CollabThreadControllerTest {
 				.expectStatus().isNotFound();
 	}
 
+	@Test
+	void rejectsTheCollabHistoryAliasForAnActiveDirectOwner() {
+		UUID ownerId = userIdentityService.resolveOrProvision("direct-history-owner").block();
+		UUID threadId = UUID.randomUUID();
+		thrRepository.save(Thr.direct(threadId, ownerId, "1:1 대화"));
+		thrMbrRepository.save(new ThrMbr(threadId, ownerId, ThrMbrRole.OWNER, ownerId));
+
+		restTestClient.get()
+				.uri("/api/collab/threads/{threadId}/messages", threadId)
+				.header(HttpHeaders.AUTHORIZATION,
+						"Bearer " + TestJwtSupport.signedJwt("direct-history-owner", List.of("USER")))
+				.exchange()
+				.expectStatus().isNotFound();
+	}
+
 	private String listThreadsAs(String subject) {
 		return restTestClient.get()
 				.uri("/api/collab/threads")

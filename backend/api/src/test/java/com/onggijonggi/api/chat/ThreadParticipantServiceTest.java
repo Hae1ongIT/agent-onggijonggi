@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
 import com.onggijonggi.api.auth.keycloak.KeycloakUserSummary;
+import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrInv;
 import com.onggijonggi.common.chat.domain.ThrInvStatus;
 import com.onggijonggi.common.chat.domain.ThrMbr;
@@ -70,6 +71,55 @@ class ThreadParticipantServiceTest {
 	void setUp() {
 		service = new ThreadParticipantService(thrMbrRepository, thrRepository, appUserRepository,
 				roomSessionRegistry, keycloakAdminClient, thrInvRepository, invitationAcceptanceService);
+		when(thrRepository.findById(any())).thenAnswer(ignored ->
+				Optional.of(Thr.collab(UUID.randomUUID(), "test room")));
+	}
+
+	@Test
+	void directOwnerCannotUseAnyParticipantManagementOperation() {
+		UUID threadId = UUID.randomUUID();
+		UUID ownerId = UUID.randomUUID();
+		givenDirectOwner(threadId, ownerId);
+
+		assertNotFound(service.list(threadId, ownerId));
+		assertNotFound(service.invite(threadId, ownerId, "invitee-sub"));
+		assertNotFound(service.searchCandidates(threadId, ownerId, "a"));
+		assertNotFound(service.revokeInvitation(threadId, ownerId, "invitee-sub"));
+		assertNotFound(service.remove(threadId, ownerId, "owner-sub", "owner-sub"));
+		assertNotFound(service.transferOwner(threadId, ownerId, "member-sub"));
+
+		verify(appUserRepository, never()).findByKeycloakSubj(any());
+		verify(keycloakAdminClient, never()).search(any(), anyInt());
+		verify(thrInvRepository, never()).save(any());
+		verify(roomSessionRegistry, never()).evict(any(), any());
+	}
+
+	@Test
+	void collabOwnerGetsAnEmptyCandidateListForAShortQueryWithoutSearchingKeycloak() {
+		UUID threadId = UUID.randomUUID();
+		UUID ownerId = UUID.randomUUID();
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, ownerId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, ownerId, ThrMbrRole.OWNER, ownerId)));
+
+		StepVerifier.create(service.searchCandidates(threadId, ownerId, "a"))
+				.expectNext(List.of())
+				.verifyComplete();
+
+		verify(keycloakAdminClient, never()).search(any(), anyInt());
+	}
+
+	@Test
+	void collabMemberStillGetsForbiddenForAShortCandidateQuery() {
+		UUID threadId = UUID.randomUUID();
+		UUID memberId = UUID.randomUUID();
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, memberId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, memberId, ThrMbrRole.MEMBER, memberId)));
+
+		StepVerifier.create(service.searchCandidates(threadId, memberId, "a"))
+				.verifyErrorSatisfies(error -> assertThat(error)
+						.isInstanceOf(ResponseStatusException.class)
+						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
+						.isEqualTo(HttpStatus.FORBIDDEN));
 	}
 
 	/**
@@ -586,6 +636,20 @@ class ThreadParticipantServiceTest {
 		verify(roomSessionRegistry).notifyIfListening(eq(threadId),
 				eq(new ParticipantChangedFrame(threadId, ParticipantChangeAction.INVITE_REVOKED,
 						"invited-sub", "초대된 사람")));
+	}
+
+	private void givenDirectOwner(UUID threadId, UUID ownerId) {
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, ownerId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, ownerId, ThrMbrRole.OWNER, ownerId)));
+		when(thrRepository.findById(threadId)).thenReturn(Optional.of(Thr.direct(threadId, ownerId, "1:1 대화")));
+	}
+
+	private static void assertNotFound(Mono<?> operation) {
+		StepVerifier.create(operation)
+				.verifyErrorSatisfies(error -> assertThat(error)
+						.isInstanceOf(ResponseStatusException.class)
+						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
+						.isEqualTo(HttpStatus.NOT_FOUND));
 	}
 
 }

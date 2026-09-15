@@ -86,13 +86,31 @@ class ThreadLifecycleServiceTest {
 
 		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
 				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.MEMBER, actorUserId)));
+		when(thrRepository.findById(threadId)).thenReturn(Optional.of(Thr.collab(actorUserId, "room")));
 
 		StepVerifier.create(service.lock(threadId, actorUserId))
 				.verifyErrorSatisfies(error -> assertThat(error)
 						.isInstanceOf(ResponseStatusException.class)
 						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
 						.isEqualTo(HttpStatus.FORBIDDEN));
-		verify(thrRepository, never()).findById(any());
+	}
+
+	@Test
+	void directOwnerCannotChangeLifecycleThroughCollabOperations() {
+		UUID actorUserId = UUID.randomUUID();
+		UUID threadId = UUID.randomUUID();
+		Thr direct = Thr.direct(threadId, actorUserId, "1:1 대화");
+		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
+				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.OWNER, actorUserId)));
+		when(thrRepository.findById(threadId)).thenReturn(Optional.of(direct));
+
+		assertNotFound(service.lock(threadId, actorUserId));
+		assertNotFound(service.archive(threadId, actorUserId));
+		assertNotFound(service.delete(threadId, actorUserId));
+
+		assertThat(direct.getStatus()).isEqualTo(ThrStatus.ACTIVE);
+		verify(thrRepository, never()).save(any());
+		verify(thrRepository, never()).delete(any());
 	}
 
 	@Test
@@ -193,6 +211,7 @@ class ThreadLifecycleServiceTest {
 
 		when(thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE))
 				.thenReturn(Optional.of(new ThrMbr(threadId, actorUserId, ThrMbrRole.MEMBER, actorUserId)));
+		when(thrRepository.findById(threadId)).thenReturn(Optional.of(Thr.collab(actorUserId, "room")));
 
 		StepVerifier.create(service.delete(threadId, actorUserId))
 				.verifyErrorSatisfies(error -> assertThat(error)
@@ -200,6 +219,14 @@ class ThreadLifecycleServiceTest {
 						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
 						.isEqualTo(HttpStatus.FORBIDDEN));
 		verify(thrRepository, never()).delete(any());
+	}
+
+	private static void assertNotFound(reactor.core.publisher.Mono<?> operation) {
+		StepVerifier.create(operation)
+				.verifyErrorSatisfies(error -> assertThat(error)
+						.isInstanceOf(ResponseStatusException.class)
+						.extracting(e -> ((ResponseStatusException) e).getStatusCode())
+						.isEqualTo(HttpStatus.NOT_FOUND));
 	}
 
 }

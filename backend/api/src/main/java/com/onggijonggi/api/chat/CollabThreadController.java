@@ -64,9 +64,6 @@ public class CollabThreadController {
 	*/
 	private static final int DISPLAY_NAME_LOOKUP_CONCURRENCY = 8;
 
-	/** 후보 검색 최소 글자 수. 한 글자로는 realm을 통째로 훑는 꼴이라 서버에서 막는다(#172). */
-	private static final int CANDIDATE_QUERY_MIN = 2;
-
 	private final CurrentActorProvider currentActorProvider;
 	private final ThrRepository thrRepository;
 	private final ThrMbrRepository thrMbrRepository;
@@ -177,16 +174,13 @@ public class CollabThreadController {
 	* 초대할 사람을 이름으로 찾는다(이슈 #172). 초대와 같은 인가(OWNER)를 쓴다 — 초대할 수 없는
 	* 사람에게 검색을 열면 계정 목록만 노출된다.
 	*
-	* 검색어가 너무 짧으면 realm을 통째로 훑는 꼴이라 여기서 막고 빈 목록으로 답한다. 오류가
-	* 아니라 빈 결과인 것은, 글자를 지워 가는 도중의 상태이지 잘못된 요청이 아니기 때문이다.
+	* 인가와 COLLAB 종류 확인을 먼저 한 뒤, 검색어가 너무 짧으면 realm을 훑지 않고 빈 목록으로 답한다.
+	* 따라서 DIRECT ID는 검색어 길이와 관계없이 존재 비노출 404다.
 	*/
 	@GetMapping("/api/collab/threads/{threadId}/participants/candidates")
 	public Flux<InviteCandidate> searchInviteCandidates(@PathVariable UUID threadId,
 			@RequestParam("q") String query) {
 		String trimmed = query.trim();
-		if (trimmed.length() < CANDIDATE_QUERY_MIN) {
-			return Flux.empty();
-		}
 		return actorUserId()
 				.flatMap(userId -> threadParticipantService.searchCandidates(threadId, userId, trimmed))
 				.flatMapMany(Flux::fromIterable);
@@ -331,7 +325,7 @@ public class CollabThreadController {
 			@RequestParam(name = "afterSeq", required = false) Long afterSeq) {
 		return currentActorProvider.currentActor()
 				.map(CurrentActor::userId)
-				.flatMap(userId -> threadMembershipService.isActiveParticipant(threadId, userId))
+				.flatMap(userId -> threadMembershipService.isActiveCollabParticipant(threadId, userId))
 				.flatMap(participant -> participant
 						? Mono.just(true)
 						: Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND)))
