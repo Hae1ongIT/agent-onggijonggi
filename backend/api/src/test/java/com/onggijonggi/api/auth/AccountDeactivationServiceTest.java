@@ -153,6 +153,27 @@ class AccountDeactivationServiceTest {
 		assertThat(ownerMembership.getEndRsn()).isEqualTo("ACCOUNT_INACTIVE");
 	}
 
+	@Test
+	void deactivateKeepsTheDirectThreadAndItsOwnerParticipation() {
+		AppUser owner = new AppUser("direct-owner-sub");
+		Thr directThread = Thr.direct(UUID.randomUUID(), owner.getId(), "1:1 대화");
+		ThrMbr ownerMembership = new ThrMbr(directThread.getId(), owner.getId(), ThrMbrRole.OWNER, owner.getId());
+
+		when(appUserRepository.findById(owner.getId())).thenReturn(Optional.of(owner));
+		when(thrMbrRepository.findByUserIdAndStatus(owner.getId(), ThrMbrStatus.ACTIVE))
+				.thenReturn(List.of(ownerMembership));
+		when(thrRepository.findById(directThread.getId())).thenReturn(Optional.of(directThread));
+
+		StepVerifier.create(service.deactivate(owner.getId())).verifyComplete();
+
+		assertThat(owner.getStatus()).isEqualTo(AppUserStatus.INACTIVE);
+		assertThat(directThread.getStatus()).isEqualTo(com.onggijonggi.common.chat.domain.ThrStatus.ACTIVE);
+		assertThat(ownerMembership.getStatus()).isEqualTo(ThrMbrStatus.ACTIVE);
+		verify(thrMbrRepository, never()).save(ownerMembership);
+		verify(thrMbrRepository, never()).transferOwnership(any(), any(), any());
+		verify(thrRepository, never()).save(directThread);
+	}
+
 	/** 이미 보관된 방을 다시 archive()하지 않는다 — archived_at을 불필요하게 갱신하지 않기 위해서다. */
 	@Test
 	void deactivateDoesNotReArchiveAnAlreadyArchivedThread() {
