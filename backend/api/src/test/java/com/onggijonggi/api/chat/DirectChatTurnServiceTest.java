@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
+import com.onggijonggi.common.chat.domain.MsgStatus;
 import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrMbr;
@@ -107,6 +108,7 @@ class DirectChatTurnServiceTest {
 		assertThat(message.getValue().getThrId()).isEqualTo(threadId);
 		assertThat(message.getValue().getSeq()).isEqualTo(7L);
 		assertThat(message.getValue().getAthKind()).isEqualTo(AthKind.AGENT);
+		assertThat(message.getValue().getStatus()).isEqualTo(MsgStatus.COMPLETE);
 		assertThat(message.getValue().getContent()).isEqualTo("완료된 응답");
 	}
 
