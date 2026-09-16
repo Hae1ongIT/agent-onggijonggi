@@ -28,7 +28,7 @@ import org.springframework.web.server.ResponseStatusException;
  *               턴을 즉시 DENIED로 전이해야 해서 AGENT PENDING 행이 미리 있어야 한다 — 그래서
  *               *WithPendingAgentBlocking 계열이 같은 트랜잭션에서 PENDING AGENT 행까지
  *               만든다(이슈 #162). HTTP를 PENDING 기반으로 통일하는 리팩터링은 별도 이슈로
- *               미뤄져 있다(1대1-채팅-WS-실시간-전환-설계.md §2.2).
+ *               미뤄져 있다.
  */
 @Service
 public class DirectChatTurnService {
