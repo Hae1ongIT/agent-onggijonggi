@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.common.chat.domain.ThrMbrStatus;
+import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
@@ -31,6 +32,14 @@ public class ThreadMembershipService {
 	public Mono<Boolean> isActiveParticipant(UUID threadId, UUID userId) {
 		return Mono.fromCallable(() ->
 						thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, userId, ThrMbrStatus.ACTIVE))
+				.subscribeOn(Schedulers.boundedElastic());
+	}
+
+	/** 기존 협업 이력 별칭만 쓰는 판정이다. 일반 참가 판정은 DIRECT WS 전환을 위해 제한하지 않는다. */
+	public Mono<Boolean> isActiveCollabParticipant(UUID threadId, UUID userId) {
+		return Mono.fromCallable(() ->
+						thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, userId, ThrMbrStatus.ACTIVE)
+								&& thrRepository.existsByIdAndKind(threadId, ThrKind.COLLAB))
 				.subscribeOn(Schedulers.boundedElastic());
 	}
 

@@ -61,8 +61,8 @@ public class Thr {
 	protected Thr() {
 	}
 
-	private Thr(ThrKind kind, UUID createdUserId, String title) {
-		this.id = UUID.randomUUID();
+	private Thr(UUID id, ThrKind kind, UUID createdUserId, String title) {
+		this.id = id;
 		this.kind = kind;
 		this.status = ThrStatus.ACTIVE;
 		this.createdUserId = createdUserId;
@@ -78,7 +78,17 @@ public class Thr {
 	* 값이 있다)을 호출부가 실수로 어기지 못하게 하기 위함이다.
 	*/
 	public static Thr collab(UUID createdUserId, String title) {
-		return new Thr(ThrKind.COLLAB, createdUserId, title);
+		return new Thr(UUID.randomUUID(), ThrKind.COLLAB, createdUserId, title);
+	}
+
+	/**
+	* DIRECT는 기존 chat_sess의 ID와 클라이언트 session ID를 그대로 thr ID로 쓰므로, ID 생성 책임을
+	* 호출자에게 둔다. owner는 DIRECT의 소유 컬럼과 최초 생성자에 같은 값으로 기록한다.
+	*/
+	public static Thr direct(UUID id, UUID ownerId, String title) {
+		Thr thread = new Thr(id, ThrKind.DIRECT, ownerId, title);
+		thread.drcOwnUserId = ownerId;
+		return thread;
 	}
 
 	public UUID getId() {
@@ -139,6 +149,12 @@ public class Thr {
 	public void archive() {
 		this.status = ThrStatus.ARCHIVED;
 		this.archivedAt = Instant.now();
+		this.updatedAt = Instant.now();
+	}
+
+	/** DIRECT 제목 수정은 소유권을 검증한 서비스만 호출한다. 유효한 제목은 앞뒤 공백을 제거해 저장한다. */
+	public void rename(String title) {
+		this.title = title;
 		this.updatedAt = Instant.now();
 	}
 

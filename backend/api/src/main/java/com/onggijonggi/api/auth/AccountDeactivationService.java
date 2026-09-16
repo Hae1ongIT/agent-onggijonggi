@@ -1,6 +1,7 @@
 package com.onggijonggi.api.auth;
 
 import com.onggijonggi.common.chat.domain.Thr;
+import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrInv;
 import com.onggijonggi.common.chat.domain.ThrInvStatus;
 import com.onggijonggi.common.chat.domain.ThrMbr;
@@ -30,7 +31,8 @@ import reactor.core.scheduler.Schedulers;
  *               그 사람이 보낸 대기 초대도 같은 사유로 거둔다(#127) — 초대는 아직 참가가 아니라
  *               참여 정리에 걸리지 않기 때문이다.
  *
- *               OWNER인 방은 #20의 "위임 전엔 나갈 수 없다" 규칙을 그대로 따른다 — 다른 ACTIVE
+ *               DIRECT의 유일 OWNER는 과거 1:1 이력의 접근 기준이므로 끝내거나 보관하지 않는다(#216).
+ *               COLLAB OWNER인 방은 #20의 "위임 전엔 나갈 수 없다" 규칙을 그대로 따른다 — 다른 ACTIVE
  *               MEMBER가 있으면 그 사람에게 위임하고, 없으면(OWNER 혼자) #131의 Thr.archive()로
  *               방을 보관한다. HTTP 엔드포인트는 두지 않는다 — 이 저장소는 어드민 UI를 만들지
  *               않기로 확정돼 있어, 관리 도구 연동은 이 서비스가 만들어질 자리만 남기고 후속으로
@@ -103,9 +105,19 @@ public class AccountDeactivationService {
 	}
 
 	private void endParticipation(ThrMbr membership) {
+		if (membership.getRole() == ThrMbrRole.OWNER && isDirectThread(membership.getThrId())) {
+			return;
+		}
 		ThrMbr toEnd = membership.getRole() == ThrMbrRole.OWNER ? handleOwnedThread(membership) : membership;
 		toEnd.end(ThrMbrStatus.REVOKED, ACCOUNT_INACTIVE);
 		thrMbrRepository.save(toEnd);
+	}
+
+	/** DIRECT의 OWNER는 계정이 비활성화돼도 방 이력과 소유 관계를 보존한다. */
+	private boolean isDirectThread(UUID threadId) {
+		return thrRepository.findById(threadId)
+				.map(thread -> thread.getKind() == ThrKind.DIRECT)
+				.orElse(false);
 	}
 
 	/**

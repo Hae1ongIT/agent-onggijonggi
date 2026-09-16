@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -22,4 +23,10 @@ public record ChatStreamRequest(
 		@NotBlank String modelId,
 		@NotEmpty List<@Valid ChatMessage> messages
 ) {
+
+	/** HTTP 1:1 저장은 마지막 입력만 HUMAN으로 기록하므로 마지막 role은 user여야 한다. */
+	@AssertTrue(message = "마지막 메시지의 role은 user여야 합니다.")
+	public boolean hasUserLastMessage() {
+		return messages != null && !messages.isEmpty() && "user".equals(messages.get(messages.size() - 1).role());
+	}
 }

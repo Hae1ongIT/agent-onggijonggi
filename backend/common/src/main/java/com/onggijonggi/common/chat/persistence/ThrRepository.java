@@ -21,6 +21,12 @@ public interface ThrRepository extends JpaRepository<Thr, UUID> {
 	/** LOCKED·ARCHIVED로 바뀐 방에서 새 메시지·초대 같은 쓰기 작업을 막는 판정에 쓴다(#131). */
 	boolean existsByIdAndStatus(UUID id, ThrStatus status);
 
+	/** 협업방 전용 API가 DIRECT 방을 존재 비노출 404로 막을 때 쓰는 종류 확인이다. */
+	boolean existsByIdAndKind(UUID id, ThrKind kind);
+
+	/** 기존 1:1 목록 호환 경로는 DIRECT 소유 Thread만 생성 시각 역순으로 읽는다. */
+	List<Thr> findByKindAndDrcOwnUserIdOrderByCreatedAtDesc(ThrKind kind, UUID drcOwnUserId);
+
 	/** 위험 발화 사후 검증 배치가 스캔할 대상이다(#28) — ARCHIVED는 새 메시지가 없어 제외한다. */
 	List<Thr> findByKindAndStatusNot(ThrKind kind, ThrStatus status);
 

@@ -1,8 +1,10 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.api.auth.keycloak.KeycloakAdminClient;
+import com.onggijonggi.common.chat.domain.Thr;
 import com.onggijonggi.common.chat.domain.ThrInv;
 import com.onggijonggi.common.chat.domain.ThrInvStatus;
+import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrMbr;
 import com.onggijonggi.common.chat.domain.ThrMbrRole;
 import com.onggijonggi.common.chat.domain.ThrMbrStatus;
@@ -54,6 +56,9 @@ public class ThreadParticipantService {
 	/** 후보 검색 상한. 초대창은 좁혀서 고르는 자리라, 많이 주기보다 검색어를 좁히게 하는 편이 낫다. */
 	private static final int CANDIDATE_SEARCH_MAX = 20;
 
+	/** 짧은 검색어는 Keycloak realm 전체를 훑지 않고 빈 목록으로 끝낸다. */
+	private static final int CANDIDATE_QUERY_MIN = 2;
+
 	private final ThrMbrRepository thrMbrRepository;
 	private final ThrRepository thrRepository;
 	private final AppUserRepository appUserRepository;
@@ -78,7 +83,7 @@ public class ThreadParticipantService {
 	/** 참가자면 누구나 볼 수 있다 — 자기 방 구성원을 읽는 것뿐이라 OWNER로 좁히지 않는다. */
 	public Mono<List<ThreadParticipant>> list(UUID threadId, UUID actorUserId) {
 		return Mono.fromCallable(() -> {
-					requireActiveParticipant(threadId, actorUserId);
+					requireActiveCollabParticipant(threadId, actorUserId);
 					return activeParticipants(threadId, actorUserId);
 				})
 				.subscribeOn(Schedulers.boundedElastic());
@@ -92,7 +97,7 @@ public class ThreadParticipantService {
 	*/
 	public Mono<Void> invite(UUID threadId, UUID actorUserId, String inviteeSubject) {
 		return Mono.fromCallable(() -> {
-					requireOwnerRole(requireActiveParticipant(threadId, actorUserId));
+					requireOwnerRole(requireActiveCollabParticipant(threadId, actorUserId));
 					requireWritableThread(threadId);
 					return appUserRepository.findByKeycloakSubj(inviteeSubject).map(AppUser::getId);
 				})
@@ -110,19 +115,21 @@ public class ThreadParticipantService {
 	* 스레드 스코프인 것은 그 인가를 재사용하기 위해서이자, 이미 그 방에 있는 사람과 이미 부른
 	* 사람을 결과에서 뺄 수 있기 때문이다 — 고를 수 없는 항목을 보여줄 이유가 없다.
 	*
-	* @param query 부분 일치 검색어. 너무 짧으면 realm을 통째로 훑는 꼴이라 호출부가 막는다
+	* @param query 부분 일치 검색어. 인가 뒤 너무 짧으면 realm을 통째로 훑지 않고 빈 목록을 돌린다
 	*/
 	public Mono<List<InviteCandidate>> searchCandidates(UUID threadId, UUID actorUserId, String query) {
 		return Mono.fromCallable(() -> {
-					requireOwnerRole(requireActiveParticipant(threadId, actorUserId));
-					return excludedSubjects(threadId);
+					requireOwnerRole(requireActiveCollabParticipant(threadId, actorUserId));
+					return query.length() < CANDIDATE_QUERY_MIN ? Optional.<Set<String>>empty()
+							: Optional.of(excludedSubjects(threadId));
 				})
 				.subscribeOn(Schedulers.boundedElastic())
-				.flatMap(excluded -> keycloakAdminClient.search(query, CANDIDATE_SEARCH_MAX)
+				.flatMap(excluded -> excluded.map(subjects -> keycloakAdminClient.search(query, CANDIDATE_SEARCH_MAX)
 						.map(found -> found.stream()
-								.filter(user -> !excluded.contains(user.subject()))
+								.filter(user -> !subjects.contains(user.subject()))
 								.map(user -> new InviteCandidate(user.subject(), user.displayName()))
-								.toList()));
+								.toList()))
+						.orElseGet(() -> Mono.just(List.of())));
 	}
 
 	/** 이미 참가 중이거나 이미 대기 초대가 있는 사람 — 다시 부를 수 없으니 후보에서 뺀다. */
@@ -145,7 +152,7 @@ public class ThreadParticipantService {
 	*/
 	public Mono<Void> revokeInvitation(UUID threadId, UUID actorUserId, String inviteeSubject) {
 		return Mono.<Void>fromCallable(() -> {
-					requireOwnerRole(requireActiveParticipant(threadId, actorUserId));
+					requireOwnerRole(requireActiveCollabParticipant(threadId, actorUserId));
 					ThrInv invitation = thrInvRepository
 							.findByThrIdAndSubjAndStatus(threadId, inviteeSubject, ThrInvStatus.PENDING)
 							.orElseThrow(ThreadParticipantService::notParticipant);
@@ -255,7 +262,7 @@ public class ThreadParticipantService {
 	*/
 	public Mono<Void> remove(UUID threadId, UUID actorUserId, String actorSubject, String targetSubject) {
 		return Mono.<Void>fromCallable(() -> {
-					ThrMbr actor = requireActiveParticipant(threadId, actorUserId);
+					ThrMbr actor = requireActiveCollabParticipant(threadId, actorUserId);
 					if (targetSubject.equals(actorSubject)) {
 						leaveSelf(actor);
 						return null;
@@ -282,7 +289,7 @@ public class ThreadParticipantService {
 	*/
 	public Mono<Void> transferOwner(UUID threadId, UUID actorUserId, String targetSubject) {
 		return Mono.<Void>fromCallable(() -> {
-					requireOwnerRole(requireActiveParticipant(threadId, actorUserId));
+					requireOwnerRole(requireActiveCollabParticipant(threadId, actorUserId));
 					UUID targetUserId = resolveUserId(targetSubject);
 					thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, targetUserId,
 									ThrMbrRole.MEMBER, ThrMbrStatus.ACTIVE)
@@ -386,6 +393,15 @@ public class ThreadParticipantService {
 	private ThrMbr requireActiveParticipant(UUID threadId, UUID userId) {
 		return thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, userId, ThrMbrStatus.ACTIVE)
 				.orElseThrow(ThreadParticipantService::notParticipant);
+	}
+
+	/** 협업방 전용 연산은 참가 확인 뒤 종류를 검사해 DIRECT의 존재·역할을 노출하지 않는다. */
+	private ThrMbr requireActiveCollabParticipant(UUID threadId, UUID userId) {
+		ThrMbr participant = requireActiveParticipant(threadId, userId);
+		if (thrRepository.findById(threadId).map(Thr::getKind).filter(ThrKind.COLLAB::equals).isEmpty()) {
+			throw notParticipant();
+		}
+		return participant;
 	}
 
 	private void requireOwnerRole(ThrMbr actor) {

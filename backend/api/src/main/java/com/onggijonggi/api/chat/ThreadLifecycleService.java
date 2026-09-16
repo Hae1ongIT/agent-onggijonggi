@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.common.chat.domain.Thr;
+import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrMbrRole;
 import com.onggijonggi.common.chat.domain.ThrMbrStatus;
 import com.onggijonggi.common.chat.domain.ThrStatus;
@@ -78,17 +79,21 @@ public class ThreadLifecycleService {
 	}
 
 	/**
-	* actor가 그 방의 ACTIVE OWNER인지 확인하고 Thr을 반환한다. thr_mbr 존재로 방 존재를 대신
+	* actor가 COLLAB 방의 ACTIVE OWNER인지 확인하고 Thr을 반환한다. thr_mbr 존재로 방 존재를 대신
 	* 확인하는 것은 ThreadParticipantService와 같은 이유다 — 참가자가 아니면 방이 있는지조차
 	* 알리지 않는다.
 	*/
 	private Thr requireOwnerActor(UUID threadId, UUID actorUserId) {
 		var actor = thrMbrRepository.findByThrIdAndUserIdAndStatus(threadId, actorUserId, ThrMbrStatus.ACTIVE)
 				.orElseThrow(ThreadLifecycleService::notParticipant);
+		Thr thread = thrRepository.findById(threadId).orElseThrow(ThreadLifecycleService::notParticipant);
+		if (thread.getKind() != ThrKind.COLLAB) {
+			throw notParticipant();
+		}
 		if (actor.getRole() != ThrMbrRole.OWNER) {
 			throw new ResponseStatusException(HttpStatus.FORBIDDEN);
 		}
-		return thrRepository.findById(threadId).orElseThrow(ThreadLifecycleService::notParticipant);
+		return thread;
 	}
 
 	private static ResponseStatusException notParticipant() {
