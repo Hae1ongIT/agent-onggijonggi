@@ -315,7 +315,7 @@ class ThreadMessageDispatcherTest {
 		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(source.asFlux());
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		// 첫 턴은 평소대로 시작시킨다 — 이게 뒤에 방송 실패로 방을 닫는 쪽이다.
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
@@ -453,7 +453,7 @@ class ThreadMessageDispatcherTest {
 			releaseContext.await(1, TimeUnit.SECONDS);
 			return List.of();
 		});
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		UUID turnId = UUID.randomUUID();
 
 		try {
