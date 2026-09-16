@@ -43,6 +43,10 @@ export interface FrameStreamCallbacks {
   onChatCitation?: (payload: CitationsResponse) => void;
   onChatMessage?: (frame: ChatMessageFrame) => void;
   onPresenceJoin?: (frame: PresenceJoinFrame) => void;
+  /** chat.answer가 terminal 상태로 끝날 때 한 번 불린다(이슈 #162). useChat의 text 스트림
+   * body는 "끝났다"만 전할 뿐 "왜 끝났는지"(정상 완료·취소·FIFO 거절)를 못 실어서, DIRECT
+   * 화면이 PENDING·CANCELLED·DENIED를 구분해 보여주려면 이 콜백이 따로 필요하다. */
+  onChatAnswerTerminal?: (status: 'done' | 'cancelled' | 'denied') => void;
 }
 
 /** GlobalExceptionHandler.java가 code별로 매기는 HTTP status와 동일하게 맞춘다(errors.ts의
@@ -127,7 +131,11 @@ export async function frameSourceToResponse(
                   restrictedResultsOmitted: f.restrictedResultsOmitted,
                 });
               }
-              if (f.status === 'done') controller.close();
+              // cancelled·denied는 DIRECT 전용 terminal 상태다(이슈 #162) — done과 같이 스트림을 닫는다.
+              if (f.status === 'done' || f.status === 'cancelled' || f.status === 'denied') {
+                callbacks.onChatAnswerTerminal?.(f.status);
+                controller.close();
+              }
             },
             onError: (f) =>
               controller.error(
@@ -140,7 +148,10 @@ export async function frameSourceToResponse(
           });
 
           const isTerminal =
-            (frame.type === 'chat.answer' && frame.status === 'done') ||
+            (frame.type === 'chat.answer' &&
+              (frame.status === 'done' ||
+                frame.status === 'cancelled' ||
+                frame.status === 'denied')) ||
             frame.type === 'error';
           if (isTerminal) return;
         }

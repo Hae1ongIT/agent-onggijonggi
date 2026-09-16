@@ -11,7 +11,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
  *               드러나지 않는다.
  *
  *               이 목록이 곧 화이트리스트다. 여기 없는 type은 역직렬화가 실패해 MALFORMED_REQUEST로
- *               떨어진다. 다만 서버 전용 타입은 그 전에 CollabWebSocketHandler가 조용히 거른다(#157).
+ *               떨어진다. 다만 서버 전용 타입은 그 전에 ThreadWebSocketHandler가 조용히 거른다(#157).
  *
  *               프론트 계약은 frontend/lib/transport/frames.ts의 ClientFrame 유니온이 미러링한다.
  */

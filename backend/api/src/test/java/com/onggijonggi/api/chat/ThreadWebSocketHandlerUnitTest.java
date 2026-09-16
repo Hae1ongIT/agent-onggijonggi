@@ -1,10 +1,12 @@
 package com.onggijonggi.api.chat;
 
+import com.onggijonggi.common.chat.domain.ThrKind;
 import java.security.Principal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -37,13 +39,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Class Name : CollabWebSocketHandlerUnitTest.java
- * Description : `WebSocketSession`을 mock으로 대체해 `CollabWebSocketHandler`의 구독·종료
+ * Class Name : ThreadWebSocketHandlerUnitTest.java
+ * Description : `WebSocketSession`을 mock으로 대체해 `ThreadWebSocketHandler`의 구독·종료
  *               경로만 좁게 검증한다. receive/send가 정확히 한 번씩만 구독되는지, 사용자
  *               프로비저닝 실패 시 INTERNAL_ERROR 후 정상 종료하는지, JWT 만료 시 4000으로 닫는지,
  *               방 버퍼가 넘칠 때 커넥션은 두고 그 방 구독만 푸는지(이슈 #161)를 실제 소켓 없이 확인한다.
  */
-class CollabWebSocketHandlerUnitTest {
+class ThreadWebSocketHandlerUnitTest {
 
 	private static final long WINDOW_SECONDS = 60;
 
@@ -71,7 +73,7 @@ class CollabWebSocketHandlerUnitTest {
 		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		CollabWebSocketHandler handler = handler(registry, provisioning);
+		ThreadWebSocketHandler handler = handler(registry, provisioning);
 
 		handler.handle(session).block();
 
@@ -99,7 +101,7 @@ class CollabWebSocketHandlerUnitTest {
 				.doOnNext(message -> sent.set(message.getPayloadAsText())).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		CollabWebSocketHandler handler = handler(registry, provisioning);
+		ThreadWebSocketHandler handler = handler(registry, provisioning);
 
 		handler.handle(session).block();
 
@@ -128,7 +130,7 @@ class CollabWebSocketHandlerUnitTest {
 		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		CollabWebSocketHandler handler = handler(registry, provisioning);
+		ThreadWebSocketHandler handler = handler(registry, provisioning);
 
 		handler.handle(session).block(java.time.Duration.ofSeconds(1));
 
@@ -182,7 +184,7 @@ class CollabWebSocketHandlerUnitTest {
 				slowLeft.countDown();
 			}
 		});
-		CollabWebSocketHandler handler = handler(registry, provisioning);
+		ThreadWebSocketHandler handler = handler(registry, provisioning);
 		var handlerSubscription = handler.handle(session).subscribe();
 		try {
 			assertThat(slowJoined.await(1, TimeUnit.SECONDS)).isTrue();
@@ -204,6 +206,7 @@ class CollabWebSocketHandlerUnitTest {
 	private static ThreadMembershipService admittingMembership() {
 		ThreadMembershipService membership = mock(ThreadMembershipService.class);
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
+		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.COLLAB)));
 		return membership;
 	}
 
@@ -240,12 +243,17 @@ class CollabWebSocketHandlerUnitTest {
 		verify(session, times(1)).close(CloseStatus.NORMAL);
 	}
 
-	/** 구독하지 않은 방으로 온 발화는 방송하지 않고 NOT_SUBSCRIBED로 돌려준다(이슈 #161). */
+	/**
+	* 구독되지 않은 첫 발화는 DIRECT bootstrap 후보다(이슈 #162) — 이 threadId가 이미 COLLAB이거나
+	* 남의 것이면 DirectChatTurnService가 404를 던지고, 존재를 드러내지 않으면서 클라이언트의 기존
+	* NOT_SUBSCRIBED 재구독 복구를 그대로 태우려고 이 경우도 NOT_SUBSCRIBED로 답한다.
+	*/
 	@Test
-	void answersNotSubscribedForAMessageToARoomThisConnectionDidNotSubscribe() {
+	void answersNotSubscribedWhenDirectBootstrapRejectsAnExistingNonDirectThread() {
 		UUID threadId = UUID.randomUUID();
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
 		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		var directChatTurnService = mock(DirectChatTurnService.class);
 		WebSocketSession session = mock(WebSocketSession.class);
 		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
 		Principal principal = () -> "unsubscribed-user";
@@ -254,6 +262,9 @@ class CollabWebSocketHandlerUnitTest {
 		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just(principal));
 		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
 		when(provisioning.resolveOrProvision("unsubscribed-user")).thenReturn(Mono.just(UUID.randomUUID()));
+		when(directChatTurnService.prepareOrCreateWithPendingAgentBlocking(any(), any(), any(), any()))
+				.thenThrow(new org.springframework.web.server.ResponseStatusException(
+						org.springframework.http.HttpStatus.NOT_FOUND));
 		stubTextMessages(session);
 		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.chatMessageFrame(threadId, "여기요"))));
 		when(session.send(any())).thenAnswer(invocation -> Flux.from(
@@ -261,7 +272,7 @@ class CollabWebSocketHandlerUnitTest {
 				.doOnNext(message -> sent.add(message.getPayloadAsText())).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
 
-		handler(registry, provisioning).handle(session).block();
+		handler(registry, provisioning, MESSAGES_PER_WINDOW, directChatTurnService).handle(session).block();
 
 		assertThat(sent).singleElement().asString()
 				.contains("\"code\":\"NOT_SUBSCRIBED\"", "\"threadId\":\"" + threadId + "\"");
@@ -281,21 +292,28 @@ class CollabWebSocketHandlerUnitTest {
 						invocation.<String>getArgument(0).getBytes(java.nio.charset.StandardCharsets.UTF_8))));
 	}
 
-	private static CollabWebSocketHandler handler(RoomSessionRegistry registry,
+	private static ThreadWebSocketHandler handler(RoomSessionRegistry registry,
 			com.onggijonggi.api.auth.UserIdentityService provisioning) {
 		return handler(registry, provisioning, MESSAGES_PER_WINDOW);
 	}
 
 	/** 레이트리밋(#74)이 관심사인 테스트만 한도를 좁혀 준다. */
-	private static CollabWebSocketHandler handler(RoomSessionRegistry registry,
+	private static ThreadWebSocketHandler handler(RoomSessionRegistry registry,
 			com.onggijonggi.api.auth.UserIdentityService provisioning, int messagesPerWindow) {
+		return handler(registry, provisioning, messagesPerWindow, mock(DirectChatTurnService.class));
+	}
+
+	/** DIRECT bootstrap(이슈 #162)이 관심사인 테스트만 이 서비스를 직접 stub한다. */
+	private static ThreadWebSocketHandler handler(RoomSessionRegistry registry,
+			com.onggijonggi.api.auth.UserIdentityService provisioning, int messagesPerWindow,
+			DirectChatTurnService directChatTurnService) {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.never());
-		CollabMessageDispatcher dispatcher = new CollabMessageDispatcher(registry, llm,
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
 				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
 				Schedulers.parallel());
-		return new CollabWebSocketHandler(new JsonMapper(), registry, dispatcher, provisioning,
-				admittingMembership(), Clock.systemUTC(), WINDOW_SECONDS, messagesPerWindow);
+		return new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher, provisioning,
+				admittingMembership(), directChatTurnService, Clock.systemUTC(), WINDOW_SECONDS, messagesPerWindow);
 	}
 
 }

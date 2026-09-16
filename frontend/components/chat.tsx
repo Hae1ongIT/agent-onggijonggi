@@ -15,18 +15,13 @@ import { toast } from 'sonner';
 import { saveModelId } from '@/app/(chat)/actions';
 import { ChatHeader } from '@/components/chat-header';
 import { LoaderIcon } from '@/components/icons';
-import {
-  CHAT_STREAM_URL,
-  buildChatRequestBody,
-  fetchCitations,
-} from '@/lib/api/chat';
-import {
-  STREAM_TRUNCATED_MESSAGE,
-  isStreamTruncated,
-  resolveChatError,
-} from '@/lib/api/errors';
-import { createAuthFetchWithReauthSignal } from '@/lib/api/http';
+import { NoticeBanner } from '@/components/notice-banner';
+import { buildChatRequestBody, fetchCitations } from '@/lib/api/chat';
+import { STREAM_TRUNCATED_MESSAGE, isStreamTruncated, resolveChatError } from '@/lib/api/errors';
 import type { ChatMsgItem } from '@/lib/api/server-history';
+import { type SystemNotice, noticeMessage } from '@/lib/collab/room-state';
+import { createDirectChatFetch } from '@/lib/transport/direct-room-fetch';
+import type { SystemNoticeFrame } from '@/lib/transport/frames';
 import {
   EMPTY_FAILED_MESSAGE_IDS,
   useChatSessionsHydrated,
@@ -43,11 +38,15 @@ export function Chat({
   availableModels,
   selectedModelId,
   serverMessages,
+  isNewDraft,
 }: {
   id: string;
   availableModels: string[];
   selectedModelId: string;
   serverMessages: ChatMsgItem[];
+  /** "/"에서 막 만든 방인지(true) URL의 기존 id로 들어온 것인지(false)(이슈 #162, §2.1) —
+   * DIRECT WS bootstrap이 구독 없이 첫 발화를 보낼지, 곧바로 room.subscribe로 시작할지를 가른다. */
+  isNewDraft: boolean;
 }) {
   const hydrated = useChatSessionsHydrated();
 
@@ -67,6 +66,7 @@ export function Chat({
       availableModels={availableModels}
       selectedModelId={selectedModelId}
       serverMessages={serverMessages}
+      isNewDraft={isNewDraft}
     />
   );
 }
@@ -79,26 +79,68 @@ function ChatSession({
   availableModels,
   selectedModelId,
   serverMessages,
+  isNewDraft,
 }: {
   id: string;
   availableModels: string[];
   selectedModelId: string;
   serverMessages: ChatMsgItem[];
+  isNewDraft: boolean;
 }) {
   // reload·messages를 onError 클로저에서 바로 참조하면 선언 전 사용(TDZ)이 되므로 ref로 가리킨다.
   const reloadRef = useRef<(() => void) | null>(null);
   const messagesRef = useRef<Message[]>([]);
 
-  // authFetch가 재로그인을 강제한 요청인지 onError가 구분하기 위한 플래그. 이 useChat
-  // 인스턴스 전용 fetch에만 물려서 인용 조회(별도 authFetch 사용)와 신호가 섞이지 않는다.
-  const forcedReauthRef = useRef(false);
-  const chatFetch = useMemo(
+  // 이번 턴이 done·cancelled·denied 중 무엇으로 끝났는지(이슈 #162, §3.2). useChat의 text
+  // 스트림 body는 "끝났다"만 전해서, onAnswerTerminal(턴 종료 시점)과 onFinish(그 턴의
+  // resultMessage.id 확정 시점)를 이 ref로 이어 붙여야 어느 메시지의 상태인지 알 수 있다.
+  const lastTerminalStatusRef = useRef<'done' | 'cancelled' | 'denied'>('done');
+  const [terminalStatusByMessageId, setTerminalStatusByMessageId] = useState<
+    Record<string, 'cancelled' | 'denied'>
+  >({});
+
+  // 방 위에 얹히는 warning 배너(#29) — 닫기 전까지 남는다. 같은 code는 최신 1건만 남긴다
+  // (room-state.ts의 upsertNotice와 같은 결). info는 배너로 남기지 않고 토스트로 지나간다.
+  const [notices, setNotices] = useState<SystemNotice[]>([]);
+  const dismissNotice = useCallback((code: string) => {
+    setNotices((prev) => prev.filter((notice) => notice.code !== code));
+  }, []);
+  const handleSystemNotice = useCallback((frame: SystemNoticeFrame) => {
+    if (frame.severity === 'info') {
+      toast.info(noticeMessage(frame.message));
+      return;
+    }
+    const notice: SystemNotice = {
+      code: frame.code,
+      message: noticeMessage(frame.message),
+      traceId: frame.traceId,
+    };
+    setNotices((prev) => {
+      const index = prev.findIndex((existing) => existing.code === notice.code);
+      if (index === -1) return [...prev, notice];
+      const next = [...prev];
+      next[index] = notice;
+      return next;
+    });
+  }, []);
+
+  // WS 커넥션은 탭이 공유하는 허브(ws-rooms.ts)가 들고 있어 인증도 그쪽 핸드셰이크 몫이다 —
+  // 옛 HTTP 경로의 authFetch 재로그인 신호는 이제 필요 없다(이슈 #162). 새 draft면 구독 없이
+  // 첫 발화만 보내고(bootstrap), 기존 방이면 처음부터 room.subscribe로 시작한다(§2.1).
+  const directChat = useMemo(
     () =>
-      createAuthFetchWithReauthSignal(() => {
-        forcedReauthRef.current = true;
+      createDirectChatFetch(id, {
+        startPromoted: !isNewDraft,
+        onAnswerTerminal: (status) => {
+          lastTerminalStatusRef.current = status;
+        },
+        onSystemNotice: handleSystemNotice,
       }),
-    [],
+    // handleSystemNotice는 useCallback([])으로 고정돼 있어 정체성이 안 바뀐다 — 방 재구독을
+    // 일으키지 않기 위해 의도적으로 deps에 넣지 않는다.
+    [id, isNewDraft],
   );
+  useEffect(() => () => directChat.dispose(), [directChat]);
 
   // useChat은 initialMessages를 최초 마운트 시점에만 반영하므로 지연 초기화로 한 번만 읽는다.
   // 로컬에 메시지가 없으면(다른 기기·새 브라우저 등) serverMessages로 폴백한다.
@@ -162,22 +204,10 @@ function ChatSession({
     [id],
   );
 
-  // 401은 authFetch에서 이미 리프레시·재로그인 처리되므로, 여기 도달하는 건 주로
-  // 400/403/429/5xx와 스트림 중단이다. 중단·오류엔 재생성(reload)을 제안한다.
+  // WS 연결 자체의 인증·재로그인은 ws-connection.ts 몫이라 여기 도달하는 건 주로 서버가 돌려준
+  // 오류 프레임(direct-room-fetch.ts가 JSON 봉투나 mid-stream 에러로 옮긴 것)이다.
   const handleChatError = useCallback(
     (error: Error) => {
-      // 재로그인이 강제된 요청은 응답을 받을 수 없다 — keepLastMessageOnError(기본값)가
-      // 이미 질문을 messages에 남겨두므로 여기선 "전송 실패" 표시만 얹는다. 로그인 화면으로
-      // 넘어가는 중이라 토스트는 띄우지 않는다.
-      if (forcedReauthRef.current) {
-        forcedReauthRef.current = false;
-        const lastMessage = messagesRef.current.at(-1);
-        if (lastMessage?.role === 'user') {
-          useChatSessionsStore.getState().markMessageFailed(id, lastMessage.id);
-        }
-        return;
-      }
-
       // duration: Infinity — 기본 지속시간 후 토스트가 사라지면 "다시 시도" 버튼도 함께
       // 사라져 재시도할 방법이 없어진다. cancel(닫기)로 재시도 없이도 넘어갈 수 있게 한다.
       if (isStreamTruncated(messagesRef.current.at(-1))) {
@@ -202,6 +232,31 @@ function ChatSession({
     [id],
   );
 
+  // setMessages도 reloadRef와 같은 이유로 ref에 담는다 — handleChatFinish가 useChat 호출보다
+  // 앞에 있어 아직 값이 없는 시점에 정의된다.
+  const setMessagesRef = useRef<
+    ((messages: Message[] | ((messages: Message[]) => Message[])) => void) | null
+  >(null);
+
+  // DIRECT 전용 terminal 상태(cancelled·denied)만 message.id별로 기억한다 — done은 평범한
+  // 완료라 화면이 따로 표시할 게 없다(이슈 #162, §3.2).
+  const handleChatFinish = useCallback((message: Message) => {
+    const status = lastTerminalStatusRef.current;
+    lastTerminalStatusRef.current = 'done';
+    if (status === 'done') return;
+    setTerminalStatusByMessageId((prev) => ({ ...prev, [message.id]: status }));
+    // useChat은 텍스트 조각을 하나라도 받아야 messages에 반영한다(onUpdate가 onTextPart
+    // 안에서만 불린다) — DENIED는 항상, CANCELLED도 즉시 취소되면 본문이 비어 조각이 하나도
+    // 안 와서 이 메시지 자체가 messages에 없을 수 있다. 그 경우만 직접 끼워 넣는다.
+    if (message.content === '') {
+      setMessagesRef.current?.((prev) =>
+        prev.some((existing) => existing.id === message.id)
+          ? prev
+          : [...prev, message],
+      );
+    }
+  }, []);
+
   const {
     messages,
     setMessages,
@@ -215,18 +270,21 @@ function ChatSession({
   } = useChat({
     id,
     initialMessages,
-    // 목업 모드에선 동일 오리진 라우트로 우회된다.
-    api: CHAT_STREAM_URL,
+    // api는 실제로 안 불린다 — fetch를 완전히 대체해 WS 기반 direct-room-fetch.ts로 보낸다
+    // (이슈 #162). useChat이 내부적으로 요구해 값만 채운다.
+    api: `ws-direct-chat:${id}`,
     // 프레이밍 없는 raw 텍스트 스트림 소비.
     streamProtocol: 'text',
-    fetch: chatFetch,
+    fetch: directChat.fetch,
     experimental_prepareRequestBody: prepareRequestBody,
     experimental_throttle: 100,
     onError: handleChatError,
+    onFinish: handleChatFinish,
   });
 
   reloadRef.current = reload;
   messagesRef.current = messages;
+  setMessagesRef.current = setMessages;
 
   useEffect(() => {
     useChatSessionsStore.getState().setSessionMessages(id, messages);
@@ -311,11 +369,21 @@ function ChatSession({
         onModelChange={handleModelChange}
       />
 
+      {/* 같은 code는 한 건뿐이라(위 handleSystemNotice) key가 겹치지 않는다. */}
+      {notices.map((notice) => (
+        <NoticeBanner
+          key={notice.code}
+          notice={notice}
+          onDismiss={() => dismissNotice(notice.code)}
+        />
+      ))}
+
       <Messages
         chatId={id}
         isLoading={isLoading}
         messages={messages}
         citationsByMessageId={citationsByMessageId}
+        terminalStatusByMessageId={terminalStatusByMessageId}
         failedMessageIds={failedMessageIds}
         onResendFailedMessage={handleResendFailedMessage}
         setMessages={setMessages}

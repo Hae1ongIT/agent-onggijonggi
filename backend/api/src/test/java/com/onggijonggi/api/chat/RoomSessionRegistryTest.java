@@ -160,9 +160,9 @@ class RoomSessionRegistryTest {
 				registry.join(roomId, slowConnectionId, anyone());
 		RoomSessionRegistry.RoomMembership fastMembership =
 				registry.join(roomId, fastConnectionId, anyone());
-		CollabWebSocketHandler.bufferForRoom(
+		ThreadWebSocketHandler.bufferForRoom(
 				slowMembership.frames(), slowOverflow).subscribe(slowSubscriber);
-		Disposable fastSubscription = CollabWebSocketHandler.bufferForRoom(
+		Disposable fastSubscription = ThreadWebSocketHandler.bufferForRoom(
 				fastMembership.frames(), fastOverflow)
 				.subscribe(fastFrames::add);
 
@@ -227,6 +227,50 @@ class RoomSessionRegistryTest {
 		firstSubscription.dispose();
 		secondSubscription.dispose();
 		registry.leave(roomId, secondConnectionId, secondUser);
+	}
+
+	/** DIRECT 방(presenceEnabled=false, 이슈 #162)은 두 번째 연결이 들어와도 입장을 방송하지
+	 * 않는다 — presence 자체가 없는 방이다. */
+	@Test
+	void presenceDisabledJoinNeverAnnouncesJoin() {
+		UUID roomId = UUID.randomUUID();
+		PresenceParticipant firstUser = participant("first");
+		PresenceParticipant secondUser = participant("second");
+		List<WsFrame> first = new CopyOnWriteArrayList<>();
+		List<WsFrame> second = new CopyOnWriteArrayList<>();
+
+		Disposable firstSubscription = registry.join(roomId, UUID.randomUUID(), firstUser, false)
+				.frames().subscribe(first::add);
+		UUID secondConnectionId = UUID.randomUUID();
+		Disposable secondSubscription = registry.join(roomId, secondConnectionId, secondUser, false)
+				.frames().subscribe(second::add);
+
+		assertThat(first).noneMatch(PresenceJoinFrame.class::isInstance);
+		assertThat(second).noneMatch(PresenceJoinFrame.class::isInstance);
+
+		firstSubscription.dispose();
+		secondSubscription.dispose();
+		registry.leave(roomId, secondConnectionId, secondUser);
+	}
+
+	/** presence 없는 방은 마지막이 아닌 연결이 빠져도 퇴장 유예를 걸지 않는다 — 걸어봤자 나중에
+	 * 아무도 못 볼 통지라 낭비다(이슈 #162). */
+	@Test
+	void presenceDisabledLeaveNeverAnnouncesLeave() throws Exception {
+		UUID roomId = UUID.randomUUID();
+		UUID stayingConnectionId = UUID.randomUUID();
+		UUID leavingConnectionId = UUID.randomUUID();
+		PresenceParticipant stayingUser = participant("staying");
+		PresenceParticipant leavingUser = participant("leaving");
+		List<WsFrame> staying = new CopyOnWriteArrayList<>();
+
+		registry.join(roomId, stayingConnectionId, stayingUser, false).frames().subscribe(staying::add);
+		registry.join(roomId, leavingConnectionId, leavingUser, false).frames().subscribe();
+
+		registry.leave(roomId, leavingConnectionId, leavingUser);
+		Thread.sleep(TEST_LEAVE_DEBOUNCE.toMillis() * 4);
+
+		assertThat(staying).noneMatch(PresenceLeaveFrame.class::isInstance);
 	}
 
 	/** 퇴장 통보는 유예(이슈 #198) 뒤에 도착하므로 리스트를 바로 보지 않고 도착을 기다린다. */
@@ -535,7 +579,7 @@ class RoomSessionRegistryTest {
 		assertThat(late.snapshot().participants()).startsWith(stayingUser);
 	}
 
-	/** evict는 kicked 신호만 완료시킨다 — 실제 연결 제거는 CollabWebSocketHandler가 leave를 불러 한다(이슈 #135). */
+	/** evict는 kicked 신호만 완료시킨다 — 실제 연결 제거는 ThreadWebSocketHandler가 leave를 불러 한다(이슈 #135). */
 	@Test
 	void evictCompletesTheKickedSignalForTheMatchingSubject() {
 		UUID roomId = UUID.randomUUID();

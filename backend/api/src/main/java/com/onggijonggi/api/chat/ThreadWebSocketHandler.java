@@ -5,6 +5,7 @@ import com.onggijonggi.api.auth.FixedWindowRateLimiter;
 import com.onggijonggi.api.auth.JwtDisplayNames;
 import com.onggijonggi.api.auth.WsSubProtocolBearerTokenConverter;
 import com.onggijonggi.api.auth.UserIdentityService;
+import com.onggijonggi.common.chat.domain.ThrKind;
 import java.security.Principal;
 import java.time.Duration;
 import java.time.Clock;
@@ -17,6 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -24,6 +26,7 @@ import org.springframework.web.reactive.socket.CloseStatus;
 import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
+import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.BufferOverflowStrategy;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -32,7 +35,7 @@ import reactor.core.scheduler.Schedulers;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Class Name : CollabWebSocketHandler.java
+ * Class Name : ThreadWebSocketHandler.java
  * Description : 협업 채팅 WebSocket 연결의 수신·송신 수명과 프레임 처리를 담당한다.
  *
  *               커넥션은 사용자(탭)당 하나이고 여러 방을 나른다(이슈 #161). 수명은 두 층으로 갈린다 —
@@ -41,13 +44,16 @@ import tools.jackson.databind.ObjectMapper;
  *               커넥션과 다른 방은 건드리지 않는다.
  */
 @Component
-public class CollabWebSocketHandler implements WebSocketHandler {
+public class ThreadWebSocketHandler implements WebSocketHandler {
 
-	private static final Logger log = LoggerFactory.getLogger(CollabWebSocketHandler.class);
+	private static final Logger log = LoggerFactory.getLogger(ThreadWebSocketHandler.class);
 
 	/** 방 하나가 이 커넥션 앞에 쌓아 둘 수 있는 프레임 수. 커넥션이 아니라 방마다 따로 센다(이슈 #161) —
 	 * 한 버퍼를 공유하면 한 방의 폭주가 그 사용자의 모든 방을 끊는다. */
 	private static final int ROOM_BUFFER_SIZE = 256;
+
+	/** DIRECT 자동 생성 제목 상한(#158/#159와 동일). */
+	private static final int TITLE_MAX_LENGTH = 50;
 
 	private static final CloseStatus TOKEN_EXPIRED = new CloseStatus(4000, "token expired");
 
@@ -63,11 +69,13 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 
 	private final RoomSessionRegistry roomSessionRegistry;
 
-	private final CollabMessageDispatcher collabMessageDispatcher;
+	private final ThreadMessageDispatcher threadMessageDispatcher;
 
 	private final UserIdentityService userIdentityService;
 
 	private final ThreadMembershipService threadMembershipService;
+
+	private final DirectChatTurnService directChatTurnService;
 
 	/**
 	 * 이 핸들러만 쓰는 버킷이다(이슈 #74). 핸드셰이크 한도(WsSecurityConfig)와 나누는 이유는
@@ -78,16 +86,18 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 	 */
 	private final FixedWindowRateLimiter messageRateLimiter;
 
-	public CollabWebSocketHandler(ObjectMapper objectMapper, RoomSessionRegistry roomSessionRegistry,
-			CollabMessageDispatcher collabMessageDispatcher, UserIdentityService userIdentityService,
-			ThreadMembershipService threadMembershipService, Clock rateLimitClock,
+	public ThreadWebSocketHandler(ObjectMapper objectMapper, RoomSessionRegistry roomSessionRegistry,
+			ThreadMessageDispatcher threadMessageDispatcher, UserIdentityService userIdentityService,
+			ThreadMembershipService threadMembershipService, DirectChatTurnService directChatTurnService,
+			Clock rateLimitClock,
 			@Value("${app.ratelimit.window-seconds:60}") long rateLimitWindowSeconds,
 			@Value("${app.ratelimit.ws-message-per-minute:60}") int wsMessagePerMinute) {
 		this.objectMapper = objectMapper;
 		this.roomSessionRegistry = roomSessionRegistry;
-		this.collabMessageDispatcher = collabMessageDispatcher;
+		this.threadMessageDispatcher = threadMessageDispatcher;
 		this.userIdentityService = userIdentityService;
 		this.threadMembershipService = threadMembershipService;
+		this.directChatTurnService = directChatTurnService;
 		this.messageRateLimiter =
 				new FixedWindowRateLimiter(rateLimitClock, rateLimitWindowSeconds, wsMessagePerMinute);
 	}
@@ -100,7 +110,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 	@Override
 	public Mono<Void> handle(WebSocketSession session) {
 		return session.getHandshakeInfo().getPrincipal()
-				.map(CollabWebSocketHandler::sessionInfoOf)
+				.map(ThreadWebSocketHandler::sessionInfoOf)
 				.defaultIfEmpty(new SessionInfo("EMPTY", "EMPTY", null))
 				.flatMap(info -> userIdentityService.resolveOrProvision(info.subject())
 						.onErrorMap(UserProvisioningFailure::new)
@@ -182,7 +192,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 					// 닫힘 표시를 먼저 한다 — 이 뒤에 끝나는 구독 요청은 스스로 방에서 빠진다(subscribe).
 					connection.markClosed();
 					roomSessionRegistry.leaveAll(connection.id(), connection.actor())
-							.forEach((threadId, generation) -> collabMessageDispatcher.closeGeneration(threadId,
+							.forEach((threadId, generation) -> threadMessageDispatcher.closeGeneration(threadId,
 									generation));
 				});
 	}
@@ -239,16 +249,8 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 			return Mono.just(malformed(threadId, traceId));
 		}
 
-		// 구독하지 않은 방에는 말할 수 없다(이슈 #161). 발화가 들어갈 방 세대도 구독이 정한다.
-		// 한도(#74)보다 앞에 둔다 — 들어가지도 못할 발화가 한도를 깎을 이유가 없다.
-		Optional<UUID> roomGeneration = roomSessionRegistry.generationFor(threadId, connection.id());
-		if (roomGeneration.isEmpty()) {
-			return Mono.just(notSubscribed(threadId, traceId));
-		}
-
-		// 한도를 넘으면 이 프레임만 버리고 연결은 유지한다(이슈 #74). 끊으면 클라이언트가 백오프로
-		// 다시 붙어 핸드셰이크 쪽 부하로 옮겨갈 뿐이다. 멤버십 조회(DB)보다 앞에 두어 값싼 검사가
-		// 먼저 걸리게 한다.
+		// 한도를 넘으면 이 프레임만 버리고 연결은 유지한다(이슈 #74). DIRECT bootstrap 예외도 이
+		// 한도를 그대로 받는다(이슈 #162, §2.1) — 구독 없이 반복 시도해도 DB를 무한히 못 두드린다.
 		PresenceParticipant actor = connection.actor();
 		if (!messageRateLimiter.tryAcquire(actor.subject())) {
 			log.debug("WebSocket message rate limited threadId={} traceId={}", threadId, traceId);
@@ -256,20 +258,135 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 					"메시지를 너무 빠르게 보내고 있습니다. 잠시 후 다시 시도해 주세요.", traceId));
 		}
 
-		ChatMessageCommand command = new ChatMessageCommand(threadId, connection.userId(), actor.subject(),
-				actor.displayName(), inbound.content(), inbound.model(), inbound.clientMsgId(), inbound.turnId(),
-				connection.id(), traceId);
-		return threadMembershipService.isActiveParticipant(threadId, connection.userId())
-				.flatMap(participant -> participant
-						? rejectIfLocked(command, roomGeneration.get(), traceId)
-						: Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
-								"이 방에 메시지를 보낼 권한이 없습니다.", traceId)))
+		// 구독하지 않은 방에는 원래 말할 수 없다(이슈 #161). 단, 구독되지 않은 첫 발화는 DIRECT
+		// bootstrap 후보다(이슈 #162) — 그 경로로 넘긴다.
+		Optional<UUID> roomGeneration = roomSessionRegistry.generationFor(threadId, connection.id());
+		if (roomGeneration.isEmpty()) {
+			return bootstrapDirect(threadId, connection, actor, inbound, traceId);
+		}
+
+		// kind는 dispatcher가 DIRECT·COLLAB을 가르는 데 필요하다(이슈 #162) — 참가자 재확인과
+		// 함께 조회해 왕복을 하나 더 늘리지 않는다.
+		return Mono.zip(threadMembershipService.isActiveParticipant(threadId, connection.userId()),
+						threadMembershipService.kindOf(threadId))
+				.flatMap(check -> {
+					boolean participant = check.getT1();
+					Optional<ThrKind> kind = check.getT2();
+					if (!participant) {
+						return Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
+								"이 방에 메시지를 보낼 권한이 없습니다.", traceId));
+					}
+					if (kind.isEmpty()) {
+						return Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
+								"이 방에 메시지를 보낼 권한이 없습니다.", traceId));
+					}
+					if (kind.get() == ThrKind.DIRECT) {
+						return reserveDirectTurn(threadId, connection.userId(), inbound.content())
+								.flatMap(reserved -> rejectIfLocked(
+										new ChatMessageCommand(threadId, kind.get(), connection.userId(),
+												actor.subject(), actor.displayName(), inbound.content(),
+												inbound.model(), inbound.clientMsgId(), inbound.turnId(),
+												connection.id(), traceId, reserved),
+										roomGeneration.get(), traceId))
+								.onErrorResume(error -> reportDirectReserveFailure(threadId, roomGeneration.get(),
+										inbound.turnId(), traceId, error));
+					}
+					ChatMessageCommand command = new ChatMessageCommand(threadId, kind.get(), connection.userId(),
+							actor.subject(), actor.displayName(), inbound.content(), inbound.model(),
+							inbound.clientMsgId(), inbound.turnId(), connection.id(), traceId, null);
+					return rejectIfLocked(command, roomGeneration.get(), traceId);
+				})
 				.onErrorResume(error -> {
 					log.error("WebSocket membership re-check failed threadId={} traceId={}",
 							threadId, traceId, error);
 					return Mono.just(new ErrorFrame(threadId, "INTERNAL_ERROR",
 							"메시지를 처리하지 못했습니다.", traceId));
 				});
+	}
+
+	/**
+	* 기존 DIRECT 방에 이어 쓰는 발화마다 HUMAN·PENDING AGENT를 미리 예약한다(이슈 #162) — dispatcher가
+	* 이 값을 그대로 재사용해 중복 PENDING·seq를 만들지 않는다. bootstrap(첫 발화)은 별도 경로에서
+	* 이미 예약을 마친 뒤에만 이 핸들러로 들어오므로 여기서는 "기존 방 이어쓰기"만 다룬다.
+	*/
+	private Mono<ChatMessageCommand.ReservedTurn> reserveDirectTurn(UUID threadId, UUID userId, String content) {
+		return Mono.fromCallable(
+						() -> directChatTurnService.prepareExistingWithPendingAgentBlocking(threadId, userId, content))
+				.subscribeOn(Schedulers.boundedElastic())
+				.map(turn -> new ChatMessageCommand.ReservedTurn(turn.humanMessageId(), turn.humanSeq(),
+						turn.agentMessageId(), turn.agentSeq()));
+	}
+
+	/**
+	* 기존 DIRECT 이어쓰기의 HUMAN·PENDING AGENT 예약 저장 자체가 실패하면(이슈 #162, §2.2) 아직
+	* 아무것도 방송되지 않아 되돌릴 방송이 없다 — 방 전체에 warning
+	* system.notice(MESSAGE_DELIVERY_FAILED)를 traceId=turnId로 한 번 방송한다. 요청 탭의 frame
+	* bridge만 이 traceId를 보고 그 턴을 terminal 오류로 끝내고, 다른 탭은 배너로만 본다.
+	*/
+	private Mono<WsFrame> reportDirectReserveFailure(UUID threadId, UUID roomGeneration, UUID turnId, String traceId,
+			Throwable error) {
+		log.error("DIRECT 발화 저장 실패 threadId={} traceId={}", threadId, traceId, error);
+		try {
+			roomSessionRegistry.broadcastIfCurrent(threadId, roomGeneration, new SystemNoticeFrame(threadId,
+					"warning", "MESSAGE_DELIVERY_FAILED", "메시지를 저장하지 못했습니다.", traceIdOf(turnId, traceId)));
+		} catch (RuntimeException ignored) {
+			// 통지는 한 번만 시도하고 재시도하지 않는다 — dispatcher의 broadcastQuietly와 같은 결.
+		}
+		return Mono.empty();
+	}
+
+	/**
+	* 구독되지 않은 첫 chat.message에만 여는 DIRECT bootstrap 경로다(이슈 #162, §2.1). 요청자가
+	* 소유할 수 있는 새·기존 DIRECT 방을 원자적으로 만들거나 재확인한 뒤, 성공하면 이 연결을 presence
+	* 없는 경로로 자동 구독하고 같은 발화를 정상 dispatch로 흘려보낸다. 클라이언트 sessionId 충돌
+	* (동시 최초 생성)은 #159와 같은 패턴으로 재조회해 이어 쓴다.
+	*
+	* 기존 방이 COLLAB이거나 남의 것이면 DirectChatTurnService가 404를 던진다 — 존재를 드러내지
+	* 않으면서도 클라이언트의 기존 NOT_SUBSCRIBED 재구독 복구 경로를 그대로 태우려고 이 경우도
+	* NOT_SUBSCRIBED로 답한다. 진짜 권한이 없으면 뒤이은 room.subscribe가 기존 FORBIDDEN으로
+	* 마무리한다 — 새 오류 의미를 만들지 않는다.
+	*/
+	private Mono<WsFrame> bootstrapDirect(UUID threadId, Connection connection, PresenceParticipant actor,
+			InboundChatMessage inbound, String traceId) {
+		String title = titleFor(inbound.content());
+		return Mono
+				.fromCallable(() -> directChatTurnService.prepareOrCreateWithPendingAgentBlocking(threadId,
+						connection.userId(), inbound.content(), title))
+				.subscribeOn(Schedulers.boundedElastic())
+				.onErrorResume(DataIntegrityViolationException.class,
+						error -> Mono.fromCallable(() -> directChatTurnService
+										.prepareExistingWithPendingAgentBlocking(threadId, connection.userId(),
+												inbound.content()))
+								.subscribeOn(Schedulers.boundedElastic()))
+				.flatMap(stored -> completeBootstrap(threadId, connection, actor, inbound, traceId, stored))
+				.onErrorResume(ResponseStatusException.class, error -> Mono.just(notSubscribed(threadId, traceId)))
+				.onErrorResume(error -> {
+					log.error("DIRECT bootstrap 실패 threadId={} traceId={}", threadId, traceId, error);
+					return Mono.just(new ErrorFrame(threadId, "INTERNAL_ERROR", "방을 시작하지 못했습니다.", traceId));
+				});
+	}
+
+	/** bootstrap 트랜잭션 성공 뒤 자동 구독하고 같은 발화를 dispatch로 흘려보낸다(이슈 #162). */
+	private Mono<WsFrame> completeBootstrap(UUID threadId, Connection connection, PresenceParticipant actor,
+			InboundChatMessage inbound, String traceId, DirectChatTurnService.StoredTurn stored) {
+		subscribe(connection, threadId, false);
+		Optional<UUID> generation = roomSessionRegistry.generationFor(threadId, connection.id());
+		if (generation.isEmpty()) {
+			// subscribe() 도중 커넥션이 이미 닫혀 leaveRoom으로 빠졌다 — 보낼 곳이 없다.
+			return Mono.empty();
+		}
+		ChatMessageCommand.ReservedTurn reserved = new ChatMessageCommand.ReservedTurn(stored.humanMessageId(),
+				stored.humanSeq(), stored.agentMessageId(), stored.agentSeq());
+		ChatMessageCommand command = new ChatMessageCommand(threadId, ThrKind.DIRECT, connection.userId(),
+				actor.subject(), actor.displayName(), inbound.content(), inbound.model(), inbound.clientMsgId(),
+				inbound.turnId(), connection.id(), traceId, reserved);
+		return rejectIfLocked(command, generation.get(), traceId);
+	}
+
+	/** DIRECT 자동 생성 제목 — 첫 HUMAN 발화를 trim하고 50자를 넘으면 자른다(#158/#159와 동일 규칙). */
+	private static String titleFor(String content) {
+		String trimmed = content.trim();
+		return trimmed.length() > TITLE_MAX_LENGTH ? trimmed.substring(0, TITLE_MAX_LENGTH) : trimmed;
 	}
 
 	/**
@@ -284,7 +401,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 			return Mono.just(malformed(inbound.threadId(), traceId));
 		}
 		roomSessionRegistry.generationFor(inbound.threadId(), connection.id())
-				.ifPresent(generation -> collabMessageDispatcher.cancel(inbound.threadId(), generation,
+				.ifPresent(generation -> threadMessageDispatcher.cancel(inbound.threadId(), generation,
 						inbound.turnId(), connection.id()));
 		return Mono.empty();
 	}
@@ -317,16 +434,23 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 				});
 	}
 
+	/** COLLAB 구독 진입점 — presence 방송을 켠 채로 {@link #subscribe(Connection, UUID, boolean)}를 부른다. */
+	private void subscribe(Connection connection, UUID threadId) {
+		subscribe(connection, threadId, true);
+	}
+
 	/**
 	* 방에 등록하고 그 방의 프레임을 이 커넥션 outbound에 끼워 넣는다. 참여자 스냅샷(#26)은 방송이
 	* 아니라 이 구독의 값이라 방 버퍼 밖에서 맨 앞에 붙인다 — 클라이언트는 이것을 구독 완료로 읽는다.
+	* presenceEnabled가 false면(DIRECT, 이슈 #162) presence 자체가 없는 방이라 스냅샷을 붙이지
+	* 않는다 — 붙이면 클라이언트가 참가자 0명짜리 presence 상태를 만들어야 하는 의미 없는 부담이 된다.
 	*
 	* 강제 해지(evict)와 버퍼 넘침 신호는 방송·evict를 부른 스레드가 방 상태 잠금을 쥔 채 낸다. 그
 	* 자리에서 곧장 leave를 부르면 순회 중인 연결 목록을 고치게 되므로 스레드를 옮겨 처리한다.
 	*/
-	private void subscribe(Connection connection, UUID threadId) {
+	private void subscribe(Connection connection, UUID threadId, boolean presenceEnabled) {
 		RoomSessionRegistry.RoomMembership membership =
-				roomSessionRegistry.join(threadId, connection.id(), connection.actor());
+				roomSessionRegistry.join(threadId, connection.id(), connection.actor(), presenceEnabled);
 		if (connection.isClosed()) {
 			// 멤버십 조회가 도는 사이 커넥션이 끝났다 — 끝날 때 돈 leaveAll이 이 방을 못 봤을 수 있다.
 			leaveRoom(connection, threadId);
@@ -334,9 +458,8 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 		}
 
 		Sinks.One<Void> overflow = Sinks.one();
-		connection.attach(bufferForRoom(membership.frames(), overflow)
-				.startWith(membership.snapshot())
-				.takeUntilOther(membership.left()));
+		Flux<WsFrame> roomFrames = bufferForRoom(membership.frames(), overflow).takeUntilOther(membership.left());
+		connection.attach(presenceEnabled ? roomFrames.startWith(membership.snapshot()) : roomFrames);
 
 		membership.kicked()
 				.publishOn(Schedulers.parallel())
@@ -374,7 +497,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 	/** 방의 마지막 연결이 빠지면 소켓이 끊길 때와 똑같이 그 방 세대의 AI 작업을 닫는다. */
 	private void leaveRoom(Connection connection, UUID threadId) {
 		roomSessionRegistry.leave(threadId, connection.id(), connection.actor())
-				.ifPresent(generation -> collabMessageDispatcher.closeGeneration(threadId, generation));
+				.ifPresent(generation -> threadMessageDispatcher.closeGeneration(threadId, generation));
 	}
 
 	/**
@@ -400,7 +523,7 @@ public class CollabWebSocketHandler implements WebSocketHandler {
 	*/
 	private Mono<WsFrame> dispatch(ChatMessageCommand command, UUID roomGeneration, String traceId) {
 		try {
-			return Mono.justOrEmpty(collabMessageDispatcher.dispatch(command, roomGeneration));
+			return Mono.justOrEmpty(threadMessageDispatcher.dispatch(command, roomGeneration));
 		} catch (RuntimeException error) {
 			log.error("WebSocket room broadcast failed threadId={} traceId={}",
 					command.threadId(), traceId, error);

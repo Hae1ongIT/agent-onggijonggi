@@ -6,7 +6,7 @@ import java.util.UUID;
  * Class Name : ChatQueuedFrame.java
  * Description : 아직 시작하지 않은 {@code @AI} 턴의 상태를 방에 알린다(이슈 #160).
  *
- *               방마다 AI 턴은 한 번에 하나라(CollabMessageDispatcher) 앞 턴이 있으면 뒤 턴은
+ *               방마다 AI 턴은 한 번에 하나라(ThreadMessageDispatcher) 앞 턴이 있으면 뒤 턴은
  *               기다린다. 이 신호가 없으면 화면은 "느린 응답"과 "대기 중"을 구분하지 못한다.
  *
  *               queued — 앞 턴이 있어 기다리기 시작했다. 턴이 실제로 시작되면 따로 알리지 않는다 —

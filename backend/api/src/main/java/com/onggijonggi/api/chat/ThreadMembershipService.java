@@ -5,6 +5,7 @@ import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -46,6 +47,12 @@ public class ThreadMembershipService {
 	/** LOCKED·ARCHIVED로 바뀐 방은 ACTIVE가 아니므로 새 메시지·초대 같은 쓰기 작업을 막는다(#131). */
 	public Mono<Boolean> isOpenForWriting(UUID threadId) {
 		return Mono.fromCallable(() -> thrRepository.existsByIdAndStatus(threadId, ThrStatus.ACTIVE))
+				.subscribeOn(Schedulers.boundedElastic());
+	}
+
+	/** dispatcher가 DIRECT·COLLAB 분기를 결정하는 데 쓴다(이슈 #162). 방이 없으면 empty. */
+	public Mono<Optional<ThrKind>> kindOf(UUID threadId) {
+		return Mono.fromCallable(() -> thrRepository.findById(threadId).map(thr -> thr.getKind()))
 				.subscribeOn(Schedulers.boundedElastic());
 	}
 

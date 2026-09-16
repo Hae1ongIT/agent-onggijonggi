@@ -37,6 +37,7 @@ export default async function Page({
         availableModels={availableModels}
         selectedModelId={selectedModelId}
         serverMessages={serverMessages ?? []}
+        isNewDraft={false}
       />
     </>
   );

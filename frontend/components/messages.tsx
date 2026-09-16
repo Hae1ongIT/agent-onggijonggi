@@ -17,6 +17,8 @@ interface MessagesProps {
   isLoading: boolean;
   messages: Array<Message>;
   citationsByMessageId: Record<string, CitationsState>;
+  /** DIRECT 전용(이슈 #162, §3.2) — done이 아닌 message.id만 들어 있다. */
+  terminalStatusByMessageId: Record<string, 'cancelled' | 'denied'>;
   failedMessageIds: string[];
   onResendFailedMessage: (messageId: string) => void;
   setMessages: (
@@ -33,6 +35,7 @@ function PureMessages({
   isLoading,
   messages,
   citationsByMessageId,
+  terminalStatusByMessageId,
   failedMessageIds,
   onResendFailedMessage,
   setMessages,
@@ -79,6 +82,7 @@ function PureMessages({
           isLoading={isLoading && messages.length - 1 === index}
           isLastMessage={messages.length - 1 === index}
           citations={citationsByMessageId[message.id]}
+          terminalStatus={terminalStatusByMessageId[message.id]}
           failed={
             index === messages.length - 1 &&
             failedMessageIds.includes(message.id)
@@ -107,6 +111,13 @@ export const Messages = memo(PureMessages, (prevProps, nextProps) => {
   if (prevProps.messages.length !== nextProps.messages.length) return false;
   if (!equal(prevProps.messages, nextProps.messages)) return false;
   if (!equal(prevProps.citationsByMessageId, nextProps.citationsByMessageId))
+    return false;
+  if (
+    !equal(
+      prevProps.terminalStatusByMessageId,
+      nextProps.terminalStatusByMessageId,
+    )
+  )
     return false;
   if (!equal(prevProps.failedMessageIds, nextProps.failedMessageIds))
     return false;

@@ -41,6 +41,14 @@ const registry = new MockRoomRegistry();
 let connectionSequence = 0;
 let turnSequence = 0;
 
+/**
+ * 첫 메시지로 bootstrap된 방(이슈 #162 DIRECT 목업). presence를 방송하지 않고, @AI 멘션 없이도
+ * 모든 발화에 답한다. 목업엔 참여자·종류 테이블이 없어 "구독 없이 첫 메시지가 만든 방"이라는
+ * 이 사실 자체로 DIRECT를 흉내 낸다 — 실제 화면은 이 방식으로만 들어오고, COLLAB 화면은 항상
+ * room.subscribe를 먼저 보내므로 서로 섞이지 않는다.
+ */
+const directRooms = new Set<string>();
+
 interface SocketData {
   connectionId: string;
   subject: string;
@@ -106,11 +114,13 @@ async function streamAiAnswer(job: MockAiJob): Promise<void> {
   );
 
   for (let i = 0; i < frames.length; i++) {
-    // 부른 사람이 멈췄으면 실서버처럼 빈 done 한 장으로 스트림을 닫는다(이슈 #160).
+    // 부른 사람이 멈추면 COLLAB은 빈 done 한 장으로(이슈 #160), DIRECT는 빈 cancelled로
+    // 스트림을 닫는다(이슈 #162, §3.2) — 화면이 이 둘을 다르게 그린다.
     if (job.cancelled) {
       const last = frames.at(-1);
       if (last?.type === 'chat.answer') {
-        broadcast(job, { ...last, delta: '', citations: [], status: 'done' });
+        const status = directRooms.has(job.threadId) ? 'cancelled' : 'done';
+        broadcast(job, { ...last, delta: '', citations: [], status });
       }
       return;
     }
@@ -319,17 +329,31 @@ const server = Bun.serve<SocketData>({
       }
 
       const { threadId, clientMsgId, turnId, content } = parsed.message;
-      const generation = rooms.get(threadId);
+      let generation = rooms.get(threadId);
       if (generation === undefined) {
-        reply(
-          errorFrame(
-            threadId,
-            'NOT_SUBSCRIBED',
-            '이 방을 구독하고 있지 않습니다.',
-            `mock-not-subscribed-${++turnSequence}`,
-          ),
-        );
-        return;
+        // 구독 없이 온 첫 발화는 DIRECT bootstrap 후보다(이슈 #162, §2.1). 예약된 거부
+        // threadId만 실서버의 "기존 방이 COLLAB·남의 것" 404 경로처럼 NOT_SUBSCRIBED로 막는다.
+        if (roomAccess(threadId) === 'deny') {
+          reply(
+            errorFrame(
+              threadId,
+              'NOT_SUBSCRIBED',
+              '이 방을 구독하고 있지 않습니다.',
+              `mock-not-subscribed-${++turnSequence}`,
+            ),
+          );
+          return;
+        }
+        directRooms.add(threadId);
+        const member: RoomMember = {
+          id: connectionId,
+          subject,
+          displayName,
+          send: (text) => ws.send(text),
+        };
+        generation = registry.join(threadId, member);
+        rooms.set(threadId, generation);
+        console.log(`[mock-ws] bootstrap ${subject} → ${threadId}`);
       }
       registry.broadcastIfCurrent(threadId, generation, {
         type: 'chat.message',
@@ -345,7 +369,8 @@ const server = Bun.serve<SocketData>({
 
       scheduleMockNotice(threadId, generation, content);
 
-      const prompt = aiPrompt(content);
+      // DIRECT는 멘션 여부와 무관하게 모든 발화에 답한다(이슈 #162) — COLLAB은 @AI 멘션만.
+      const prompt = directRooms.has(threadId) ? content.trim() : aiPrompt(content);
       if (prompt === null) return;
       const traceId = `mock-turn-${++turnSequence}`;
       if (prompt === '') {

@@ -17,7 +17,7 @@ import reactor.core.publisher.Mono;
  */
 public class WsSubProtocolBearerTokenConverter implements ServerAuthenticationConverter {
 
-	/** 클라이언트·서버가 합의한 첫 번째 서브프로토콜 값 — CollabWebSocketHandler.getSubProtocols()와 반드시 같아야 한다. */
+	/** 클라이언트·서버가 합의한 첫 번째 서브프로토콜 값 — ThreadWebSocketHandler.getSubProtocols()와 반드시 같아야 한다. */
 	public static final String PROTOCOL_NAME = "access_token";
 
 	/** Spring의 HttpHeaders에는 이 헤더명 상수가 없어 리터럴로 직접 든다. */
