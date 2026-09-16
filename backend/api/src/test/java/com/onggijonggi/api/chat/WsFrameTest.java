@@ -134,7 +134,8 @@ class WsFrameTest {
 	/** 클라이언트가 만든 식별자는 에코와 답변에 그대로 실린다(이슈 #160). */
 	@Test
 	void serializesClientIdsOnEchoAndTurnIdAndModelOnAnswer() throws Exception {
-		UUID clientMsgId = UUID.randomUUID();
+		// UUID가 아닌 nanoid 형태 — 서버가 UUID로 좁혀 파싱하지 않는다는 계약을 검증한다(이슈 #224).
+		String clientMsgId = "Fup9Wytbi2B7C9A0";
 		UUID turnId = UUID.randomUUID();
 		String message = objectMapper.writeValueAsString(new ChatMessageFrame(UUID.randomUUID(), UUID.randomUUID(),
 				clientMsgId, turnId, 1L, "kc-1", "주성민", "@AI 질문"));
@@ -158,7 +159,8 @@ class WsFrameTest {
 	/** 클라이언트가 올려보내는 프레임은 WsFrame과 목록이 다른 InboundFrame으로 읽는다(이슈 #160). */
 	@Test
 	void deserializesInboundFramesByTypeTag() throws Exception {
-		UUID clientMsgId = UUID.randomUUID();
+		// UUID가 아닌 nanoid 형태 — 서버가 UUID로 좁혀 파싱하지 않는다는 계약을 검증한다(이슈 #224).
+		String clientMsgId = "Fup9Wytbi2B7C9A0";
 		UUID turnId = UUID.randomUUID();
 		UUID threadId = UUID.randomUUID();
 

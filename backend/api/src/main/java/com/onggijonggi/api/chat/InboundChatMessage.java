@@ -9,7 +9,9 @@ import java.util.UUID;
  *
  *               식별자 둘은 클라이언트가 보내기 전에 만들고, 서버는 저장하지 않은 채 되돌려준다.
  *               - clientMsgId: 이 메시지의 임시 id. chat.message 에코에 돌려준다 — 먼저 그린 말풍선을
- *                 서버 메시지로 바꿀 때의 매칭 키다.
+ *                 서버 메시지로 바꿀 때의 매칭 키다. 서버는 이 값을 해석하지 않고 그대로 돌려주기만
+ *                 하는 불투명 문자열로 다룬다(이슈 #224) — {@code useChat}이 만드는 값이 nanoid라
+ *                 UUID 형식이 아니다. turnId처럼 서버가 실제로 파싱·비교하는 값이 아니라는 뜻이다.
  *               - turnId: 이 발화가 부를 수 있는 AI 턴의 id. 서버가 턴을 만들 때만 쓰고(협업방은
  *                 {@code @AI} 멘션이 있을 때), 에코와 그 턴의 chat.answer·chat.queued에 돌려준다.
  *                 클라이언트는 에코가 오기 전에도 이 값으로 취소할 수 있다. 턴을 만들지 않는 발화에도
@@ -27,10 +29,10 @@ import java.util.UUID;
  * @param threadId 발화할 방
  * @param content 발화 원문
  * @param model 이 턴에 쓸 게이트웨이 모델 별칭. null이면 서버 기본값
- * @param clientMsgId 클라이언트가 만든 임시 메시지 id
+ * @param clientMsgId 클라이언트가 만든 임시 메시지 id. 서버는 형식을 가리지 않는다(이슈 #224)
  * @param turnId 클라이언트가 만든 턴 식별자
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record InboundChatMessage(UUID threadId, String content, String model, UUID clientMsgId, UUID turnId)
+public record InboundChatMessage(UUID threadId, String content, String model, String clientMsgId, UUID turnId)
 		implements InboundFrame {
 }

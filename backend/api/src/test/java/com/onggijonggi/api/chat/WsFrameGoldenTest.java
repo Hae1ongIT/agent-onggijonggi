@@ -48,7 +48,9 @@ class WsFrameGoldenTest {
 
 	private static final UUID MSG_ID = UUID.fromString("22222222-2222-4222-8222-222222222222");
 
-	private static final UUID CLIENT_MSG_ID = UUID.fromString("33333333-3333-4333-8333-333333333333");
+	/** UUID 형식일 필요가 없는 불투명 문자열이다(이슈 #224) — 기존 골든 파일과 바이트 호환을
+	 * 위해 값 자체는 그대로 두고 타입만 String으로 둔다. */
+	private static final String CLIENT_MSG_ID = "33333333-3333-4333-8333-333333333333";
 
 	private static final UUID TURN_ID = UUID.fromString("44444444-4444-4444-8444-444444444444");
 

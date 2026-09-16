@@ -20,7 +20,9 @@ import java.util.UUID;
  *               clientMsgId·turnId는 보낸 사람이 발화에 실은 값을 그대로 돌려준 것이다(이슈 #160).
  *               보낸 사람의 화면은 먼저 그려둔 말풍선을 clientMsgId로 찾아 서버 msgId로 바꾸고, 방의
  *               모든 화면은 turnId로 이 발화와 그 턴의 chat.answer·chat.queued를 잇는다. 저장하지
- *               않으므로 이력(MsgItem)에는 없다.
+ *               않으므로 이력(MsgItem)에는 없다. clientMsgId는 그대로 되돌려주기만 하는 불투명
+ *               문자열이라 UUID로 좁히지 않는다 — {@code useChat}이 만드는 nanoid도 그대로 받는다
+ *               (이슈 #224).
  *
  * @param msgId 이 메시지의 id. 저장되는 msg 행의 id와 같은 값이다
  * @param clientMsgId 보낸 사람이 실은 임시 메시지 id. 없었으면 null
@@ -29,6 +31,6 @@ import java.util.UUID;
  * @param from 작성자의 Keycloak subject
  * @param fromDisplayName 작성자의 표시 이름
  */
-public record ChatMessageFrame(UUID threadId, UUID msgId, UUID clientMsgId, UUID turnId, long seq, String from,
+public record ChatMessageFrame(UUID threadId, UUID msgId, String clientMsgId, UUID turnId, long seq, String from,
 		String fromDisplayName, String content) implements WsFrame {
 }
