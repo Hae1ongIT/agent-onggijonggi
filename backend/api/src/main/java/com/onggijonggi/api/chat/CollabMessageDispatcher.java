@@ -153,6 +153,9 @@ public class CollabMessageDispatcher {
 					return Optional.of(new ErrorFrame(command.threadId(), "RATE_LIMITED",
 							"이 방의 메시지 대기열이 가득 찼습니다.", command.traceId()));
 				}
+				if (prompt != null) {
+					state.unprocessedAiTurns += 1;
+				}
 			}
 			return Optional.ofNullable(malformed);
 		}
@@ -197,6 +200,9 @@ public class CollabMessageDispatcher {
 		// 턴을 못 찾는다. 대기·취소 통지도 락 안에서 보낸다: 락 밖이면 앞 턴이 막 끝나 이 턴이 먼저
 		// 시작되고, 답변 프레임 뒤에 "대기 중"이 도착할 수 있다.
 		synchronized (state) {
+			// 여기까지 오면 더 이상 "워커가 꼺지 않은" 발화가 아니다 — 아래 어느 가지로 가든
+			// 이 발화의 처리는 여기서 끝난다.
+			state.unprocessedAiTurns -= 1;
 			boolean cancelledBeforeQueue = pendingTurn.ref() != null
 					&& Boolean.TRUE.equals(state.inFlight.remove(pendingTurn.ref()));
 			if (state.closed) {
@@ -319,14 +325,26 @@ public class CollabMessageDispatcher {
 	* 무엇을 보낼지 정해지므로, 여기서만 스트림 시작이 그만큼 지연된다(이슈 #100).
 	* 델타는 개별 저장하지 않고 activeTurn.content에 누적해 턴이 끝났을 때 한 번에 완료 처리한다
 	* (PersistingChatStreamService와 동일한 결).
+	*
+	* LLM 호출 직전에 abandoned()를 보는 이유(이슈 #205): context()는 .cache()된 Mono라, 아래
+	* .subscribe()가 불릴 때 이미 완료돼 있으면 그 호출 안에서 flatMapMany까지 동기로 실행된다.
+	* 그러면 아래 synchronized 블록의 닫힘 검사는 이미 나간 호출을 되돌리지 못한다 — dispose는 이후
+	* 신호만 끊지, 벌어진 부작용을 취소하지는 못하기 때문이다.
+	*
+	* 비워 돌려줄 때 Flux.empty()가 아니라 never()인 것도 의도된 것이다. empty()면 아래 concatWith가
+	* EmptyLlmOutputException을 만들어 handleTurnError로 가는데, 취소된 턴은 방이 살아 있어
+	* MODEL_UNAVAILABLE 프레임이 실제로 방송된다 — 취소했는데 잠시 뒤 오류가 뜨는 화면이 된다.
+	* never()는 아래 update()가 곧바로 dispose 한다(이미 dispose된 Swap은 새 값을 즉시 정리한다).
 	*/
 	private void startTurn(RoomKey key, RoomAiState state, ActiveTurn activeTurn) {
 		activeTurn.pendingMsgId.subscribe();
 
 		Disposable subscription = activeTurn.turn.context()
-				.flatMapMany(context -> withTotalDeadline(Flux.defer(() -> llmChatStreamService.streamChat(
-						new ChatStreamRequest(activeTurn.turn.threadId(), modelIdFor(activeTurn.turn),
-								buildPromptMessages(context, activeTurn.turn.prompt()))))))
+				.flatMapMany(context -> abandoned(activeTurn)
+						? Flux.<String>never()
+						: withTotalDeadline(Flux.defer(() -> llmChatStreamService.streamChat(
+								new ChatStreamRequest(activeTurn.turn.threadId(), modelIdFor(activeTurn.turn),
+										buildPromptMessages(context, activeTurn.turn.prompt()))))))
 				.filter(delta -> !delta.isEmpty())
 				.doOnNext(delta -> {
 					activeTurn.content.append(delta);
@@ -346,6 +364,15 @@ public class CollabMessageDispatcher {
 				subscription.dispose();
 			}
 		}
+	}
+
+	/**
+	* 이 턴이 이미 버려졌는지. 방 닫힘(closeGeneration)과 취소(cancel)가 공통으로 내리는 신호가
+	* 이 Swap 하나라, 둘을 한 번에 본다. state.closed나 state.active로는 취소를 걸러낼 수 없다 —
+	* cancel()은 다음 대기 턴이 시작되도록 state.active를 일부러 비우지 않기 때문이다.
+	*/
+	private static boolean abandoned(ActiveTurn activeTurn) {
+		return activeTurn.subscription.isDisposed();
 	}
 
 	/** 발화가 모델을 지정하지 않았으면 서버 기본값(app.collab.ai.model)으로 돌아간다(이슈 #160). */
@@ -479,14 +506,17 @@ public class CollabMessageDispatcher {
 
 	private void closeGeneration(RoomKey key, RoomAiState state, boolean notifyPendingCancellation) {
 		ActiveTurn activeTurn;
-		boolean pendingTurnsCancelled;
+		boolean waitingTurnsCancelled;
 		synchronized (state) {
 			if (state.closed) {
 				return;
 			}
 			state.closed = true;
 			states.remove(key, state);
-			pendingTurnsCancelled = !state.pending.isEmpty();
+			// pending만 보면 알림을 놓친다(이슈 #206). dispatch()는 inbox에 넣기만 하고 돌아오므로,
+			// 워커가 아직 꺼내지 않은 @AI 발화는 pending에 없고 inFlight에만 있다. 그 상태에서 앞 턴이
+			// 방송 실패로 방을 닫으면 그 발화는 조용히 사라지고 보낸 사람은 아무 설명도 못 받았다.
+			waitingTurnsCancelled = !state.pending.isEmpty() || state.unprocessedAiTurns > 0;
 			state.pending.clear();
 			activeTurn = state.active;
 			state.active = null;
@@ -498,7 +528,7 @@ public class CollabMessageDispatcher {
 			activeTurn.subscription.dispose();
 			persistAgentCancellation(activeTurn);
 		}
-		if (notifyPendingCancellation && pendingTurnsCancelled) {
+		if (notifyPendingCancellation && waitingTurnsCancelled) {
 			try {
 				roomSessionRegistry.broadcastIfCurrent(key.threadId(), key.roomGeneration(),
 						new ErrorFrame(key.threadId(), "MESSAGE_DELIVERY_FAILED",
@@ -716,6 +746,16 @@ public class CollabMessageDispatcher {
 		* 워커가 꺼낼 때 지운다.
 		*/
 		private final Map<TurnRef, Boolean> inFlight = new HashMap<>();
+
+		/**
+		* 큐에 넣었지만 워커가 아직 처리하지 않은 {@code @AI} 발화 수(이슈 #206). 방이 닫힐 때
+		* "취소된 요청이 있었는가"를 판정하는 데 쓴다 — 그 발화는 pending에 아직 없기 때문이다.
+		*
+		* 위 inFlight로 갈음하지 않는 것은 그쪽이 turnId를 실은 발화만 담기 때문이다
+		* (TurnRef.of는 turnId가 null이면 null). turnId 없는 {@code @AI} 발화도 유효한 계약이라
+		* (frames.ts) 그쪽만 보면 같은 구멍이 남는다.
+		*/
+		private int unprocessedAiTurns;
 
 		private final SeqBlock seqBlock;
 
