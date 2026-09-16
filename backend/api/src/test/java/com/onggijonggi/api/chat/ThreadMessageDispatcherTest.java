@@ -623,7 +623,9 @@ class ThreadMessageDispatcherTest {
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
 		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
-		UUID clientMsgId = UUID.randomUUID();
+		// UUID가 아닌 nanoid 형태로 둔다 — 서버가 이 값을 UUID로 좁혀 파싱하지 않는다는 계약을
+		// 검증한다(이슈 #224, useChat이 실제로 이런 형태의 id를 만든다).
+		String clientMsgId = "Fup9Wytbi2B7C9A0";
 		UUID turnId = UUID.randomUUID();
 
 		dispatcher.dispatch(command(room, "@AI 질문", clientMsgId, turnId, null), room.membership.generation());
@@ -1038,7 +1040,7 @@ class ThreadMessageDispatcherTest {
 		return command(room, content, null, turnId, null);
 	}
 
-	private static ChatMessageCommand command(TestRoom room, String content, UUID clientMsgId, UUID turnId,
+	private static ChatMessageCommand command(TestRoom room, String content, String clientMsgId, UUID turnId,
 			String model) {
 		return new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId, room.participant.subject(),
 				room.participant.displayName(), content, model, clientMsgId, turnId, room.connectionId, "trace",

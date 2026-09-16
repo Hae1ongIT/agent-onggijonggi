@@ -171,7 +171,8 @@ class ThreadWebSocketHandlerTest {
 	@Test
 	void handlesQuietInboundFramesAndEchoesTheClientIds() throws Exception {
 		UUID threadId = rooms.openRoom("inbound-frames-user");
-		UUID clientMsgId = UUID.randomUUID();
+		// UUID가 아닌 nanoid 형태 — 서버가 UUID로 좁혀 파싱하지 않는다는 계약을 검증한다(이슈 #224).
+		String clientMsgId = "Fup9Wytbi2B7C9A0";
 		UUID turnId = UUID.randomUUID();
 		List<String> received = exchange("inbound-frames-user", threadId, List.of(
 				WsTestExchange.subscribeFrame(threadId),
