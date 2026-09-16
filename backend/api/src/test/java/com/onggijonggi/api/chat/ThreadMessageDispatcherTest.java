@@ -301,6 +301,45 @@ class ThreadMessageDispatcherTest {
 		verify(llm).streamChat(any());
 	}
 
+	/**
+	* 아직 워커가 꺼내지 않은 @AI 발화도 취소 알림에 포함한다(이슈 #206).
+	*
+	* 위 attemptsOneCancellation... 테스트는 두 번째 발화가 이미 state.pending에 들어간 흔한
+	* 경우다. 여기서는 워커를 에코 방송에 붙잡아 두어, 두 번째 발화가 pending에는 없고
+	* inFlight에만 있는 창을 결정적으로 만든다 — 이슈 작성자가 200회 중 1회 관측한 그 상태다.
+	*/
+	@Test
+	void notifiesCancellationForAnAiTurnTheWorkerHasNotQueuedYet() throws InterruptedException {
+		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
+		TestRoom room = new TestRoom(registry);
+		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(source.asFlux());
+		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+
+		// 첫 턴은 평소대로 시작시킨다 — 이게 뒤에 방송 실패로 방을 닫는 쪽이다.
+		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		// 두 번째 발화를 워커가 에코 방송하는 자리에서 붙잡는다.
+		registry.blockOnContent = "@AI second";
+		try {
+			dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
+			assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+
+			// 이 시점의 두 번째 발화는 pending에 없다. 여기서 첫 턴의 방송이 실패해 방이 닫힌다.
+			registry.failBroadcasts = true;
+			source.tryEmitNext("answer");
+
+			assertThat(registry.attemptedFrames)
+					.filteredOn(ErrorFrame.class::isInstance)
+					.extracting(frame -> ((ErrorFrame) frame).code())
+					.containsExactly("MESSAGE_DELIVERY_FAILED");
+		} finally {
+			registry.releaseWorker.countDown();
+		}
+	}
+
 	@Test
 	void closesTheGenerationWhenTheCurrentGenerationSinkKeepsFailing() {
 		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
@@ -382,6 +421,45 @@ class ThreadMessageDispatcherTest {
 			dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 			assertThat(contextStarted.await(1, TimeUnit.SECONDS)).isTrue();
 			dispatcher.closeAllGenerations();
+		} finally {
+			releaseContext.countDown();
+		}
+
+		assertThat(llmSubscribed.await(250, TimeUnit.MILLISECONDS)).isFalse();
+	}
+
+	/**
+	* 취소도 닫힘과 같은 구멍이 있다. cancel()은 state.active를 비우지 않으므로(다음 대기 턴을
+	* 막지 않기 위해서다) "방이 닫혔나 / 이 턴이 아직 활성인가"로는 걸러지지 않는다 — 두 경로가
+	* 공통으로 내리는 신호는 activeTurn.subscription.dispose() 하나뿐이다.
+	*
+	* 취소 쪽 피해가 더 크다: 방이 살아 있어 뒤늦게 시작된 턴의 오류 프레임이 실제로 방송된다.
+	*/
+	@Test
+	void doesNotStartTheLlmWhenTheTurnIsCancelledDuringContextLookup() throws InterruptedException {
+		TestRoom room = new TestRoom();
+		CountDownLatch contextStarted = new CountDownLatch(1);
+		CountDownLatch releaseContext = new CountDownLatch(1);
+		CountDownLatch llmSubscribed = new CountDownLatch(1);
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
+			llmSubscribed.countDown();
+			return Flux.never();
+		}));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.persistHumanMessageAndFetchContextBlocking(any(), anyLong(), eq(room.threadId),
+				eq(room.userId), eq("@AI first"), anyInt())).thenAnswer(invocation -> {
+			contextStarted.countDown();
+			releaseContext.await(1, TimeUnit.SECONDS);
+			return List.of();
+		});
+		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		UUID turnId = UUID.randomUUID();
+
+		try {
+			dispatcher.dispatch(command(room, "@AI first", turnId), room.membership.generation());
+			assertThat(contextStarted.await(1, TimeUnit.SECONDS)).isTrue();
+			dispatcher.cancel(room.threadId, room.membership.generation(), turnId, room.connectionId);
 		} finally {
 			releaseContext.countDown();
 		}
@@ -530,7 +608,11 @@ class ThreadMessageDispatcherTest {
 		registry.failBroadcasts = true;
 		source.tryEmitComplete();
 
-		verify(msgPersistenceService, timeout(1000)).completeBlocking(pending.getId(), "answer");
+		// 여기만 다른 테스트보다 넓게 기다린다(이슈 #207). 완료 저장은 방송 실패로 예외가 한 번 더
+		// 오가는 경로라 스케줄링 편차가 누적되는데, 같은 JVM에서 클래스 전체를 연달아 돌리는 CI에서는
+		// 1초 창이 빠듯해 10회 중 1~2회 간헐 실패했다. 프로덕션 순서·로직 결함이 아니라는 것은
+		// 이슈에서 반복 측정으로 확인됐다(#207, Refs #197).
+		verify(msgPersistenceService, timeout(5000)).completeBlocking(pending.getId(), "answer");
 		verify(msgPersistenceService, never()).cancelBlocking(eq(pending.getId()), any());
 	}
 
@@ -587,6 +669,10 @@ class ThreadMessageDispatcherTest {
 				.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).status())
 				.containsExactly(tuple("부분", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE),
 						tuple("next", ChatAnswerStatus.STREAMING), tuple("", ChatAnswerStatus.DONE));
+		// 취소는 done으로 끝난다 — 오류 프레임이 따라붙으면 화면은 "취소했는데 잠시 뒤 오류"가 된다.
+		// startTurn()이 버려진 턴에 Flux.empty()를 돌려주면 EmptyLlmOutputException을 거쳤
+		// MODEL_UNAVAILABLE이 여기 따라붙는다(이슈 #205).
+		assertThat(room.frames).noneMatch(ErrorFrame.class::isInstance);
 	}
 
 	/** turnId는 클라이언트가 만든 값이라 그 발화가 들어온 커넥션에서만 인정한다 — 다른 커넥션이 같은 값을 보내도 턴은 계속된다. */
@@ -953,6 +1039,17 @@ class ThreadMessageDispatcherTest {
 
 		private boolean failBroadcasts;
 
+		/**
+		* 이 내용의 사람 메시지를 방송하는 자리에서 워커를 붙잡아 둔다(이슈 #206 재현용). 워커가
+		* 여기 멈춰 있는 동안 그 발화는 inbox에서는 빠졌지만 아직 registerTurn에 닿지 않아
+		* state.pending에 없고 state.inFlight에만 있다 — 문제의 창이 바로 그 상태다.
+		*/
+		private volatile String blockOnContent;
+
+		private final CountDownLatch workerBlocked = new CountDownLatch(1);
+
+		private final CountDownLatch releaseWorker = new CountDownLatch(1);
+
 		FailingRoomSessionRegistry() {
 			super(Duration.ofMillis(50));
 		}
@@ -960,6 +1057,14 @@ class ThreadMessageDispatcherTest {
 		@Override
 		public boolean broadcastIfCurrent(UUID threadId, UUID roomGeneration, WsFrame frame) {
 			attemptedFrames.add(frame);
+			if (frame instanceof ChatMessageFrame message && message.content().equals(blockOnContent)) {
+				workerBlocked.countDown();
+				try {
+					releaseWorker.await(2, TimeUnit.SECONDS);
+				} catch (InterruptedException error) {
+					Thread.currentThread().interrupt();
+				}
+			}
 			if (failBroadcasts) {
 				throw new IllegalStateException("sink failure");
 			}
