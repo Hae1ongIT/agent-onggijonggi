@@ -6,7 +6,7 @@
  재생성하므로, 이전 메시지에 붙이면 그 메시지가 다시 만들어지는 것으로 오해하게 된다.
  *********************************************************/
 
-import type { ChatRequestOptions, Message } from 'ai';
+import type { Message } from 'ai';
 import { memo } from 'react';
 import { toast } from 'sonner';
 import { useCopyToClipboard } from 'usehooks-ts';
@@ -24,15 +24,13 @@ export function PureMessageActions({
   message,
   isLoading,
   isLastMessage,
-  reload,
+  onRegenerate,
 }: {
   chatId: string;
   message: Message;
   isLoading: boolean;
   isLastMessage: boolean;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
+  onRegenerate: () => void;
 }) {
   const [_, copyToClipboard] = useCopyToClipboard();
 
@@ -68,7 +66,7 @@ export function PureMessageActions({
                 className="py-1 px-2 h-fit text-muted-foreground"
                 variant="outline"
                 aria-label="답변 다시 생성"
-                onClick={() => reload()}
+                onClick={onRegenerate}
               >
                 <UndoIcon />
               </Button>

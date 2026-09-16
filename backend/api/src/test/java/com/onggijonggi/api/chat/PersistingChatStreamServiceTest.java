@@ -53,7 +53,7 @@ class PersistingChatStreamServiceTest {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
 		UUID agentMessageId = UUID.randomUUID();
-		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(agentMessageId, sessionId, 1L);
+		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 0L, agentMessageId, sessionId, 1L);
 		ChatStreamRequest request = request(sessionId, " 안녕 ");
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
 		when(directChatTurnService.prepareOrCreateBlocking(eq(sessionId), eq(userId), eq(" 안녕 "), eq("안녕")))
@@ -108,7 +108,7 @@ class PersistingChatStreamServiceTest {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
 		UUID agentMessageId = UUID.randomUUID();
-		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(agentMessageId, sessionId, 1L);
+		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 0L, agentMessageId, sessionId, 1L);
 		ChatStreamRequest request = request(sessionId, "안녕");
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
 		when(directChatTurnService.prepareOrCreateBlocking(any(), any(), any(), any()))
@@ -128,7 +128,7 @@ class PersistingChatStreamServiceTest {
 	void doesNotCreateAgentMessageWhenLlmStreamErrors() {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
-		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), sessionId, 1L);
+		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 0L, UUID.randomUUID(), sessionId, 1L);
 		ChatStreamRequest request = request(sessionId, "안녕");
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));
 		when(directChatTurnService.prepareOrCreateBlocking(any(), any(), any(), any())).thenReturn(turn);
@@ -145,7 +145,7 @@ class PersistingChatStreamServiceTest {
 	void doesNotCreateAgentMessageWhenClientCancelsStream() {
 		UUID sessionId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
-		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), sessionId, 1L);
+		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 0L, UUID.randomUUID(), sessionId, 1L);
 		ChatStreamRequest request = request(sessionId, "안녕");
 		CountDownLatch subscribed = new CountDownLatch(1);
 		when(currentActorProvider.currentActor()).thenReturn(Mono.just(new CurrentActor(userId, "sub-1", "sub-1")));

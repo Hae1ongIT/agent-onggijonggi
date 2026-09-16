@@ -38,6 +38,16 @@ export const MODELS_PATH = '/api/models';
 export const CHAT_STREAM_PATH = '/api/chat/stream';
 export const CHAT_CITATIONS_PATH = '/api/chat/citations';
 export const CHAT_SESSIONS_PATH = '/api/chat/sessions';
+export const THREADS_PATH = '/api/threads';
+
+/** DIRECT·COLLAB 공용 이력 커서 경로(#159). */
+export const threadMessagesPath = (
+  threadId: string,
+  afterSeq?: number,
+): string => {
+  const base = `${THREADS_PATH}/${encodeURIComponent(threadId)}/messages`;
+  return afterSeq === undefined ? base : `${base}?afterSeq=${afterSeq}`;
+};
 
 /** 협업 채널(방) 목록 조회 경로(이슈 #19). 목록 필터링은 서버 몫이라 프론트는 표시만 한다. */
 export const COLLAB_THREADS_PATH = '/api/collab/threads';

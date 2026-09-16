@@ -2,6 +2,7 @@ package com.onggijonggi.api.chat;
 
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgStatus;
+import com.onggijonggi.common.chat.domain.ThrKind;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -35,17 +36,17 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Class Name : CollabMessageDispatcherTest.java
+ * Class Name : ThreadMessageDispatcherTest.java
  * Description : 협업방 AI FIFO 실행, timeout, generation 취소 계약을 단위 테스트로 검증한다.
  */
-class CollabMessageDispatcherTest {
+class ThreadMessageDispatcherTest {
 
 	/** 워커가 직렬로 꺼내므로 방송 순서와 seq 순서가 같다 — #190이 지키려는 계약의 본체다. */
 	@Test
 	void assignsSeqInBroadcastOrder() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "하나"), room.membership.generation());
 		dispatcher.dispatch(command(room, "둘"), room.membership.generation());
@@ -68,7 +69,7 @@ class CollabMessageDispatcherTest {
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
 				.thenAnswer(invocation -> Msg.pendingAgent(invocation.getArgument(0), room.threadId,
 						invocation.getArgument(1)));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "@AI 질문"), room.membership.generation());
 
@@ -88,7 +89,7 @@ class CollabMessageDispatcherTest {
 	void broadcastsOrdinaryMessagesWithoutCallingTheLlm() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		assertThat(dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation())).isEmpty();
 
@@ -103,7 +104,7 @@ class CollabMessageDispatcherTest {
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("second"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI one"), room.membership.generation());
 		dispatcher.dispatch(command(room, "@AI two"), room.membership.generation());
@@ -131,7 +132,7 @@ class CollabMessageDispatcherTest {
 	void rejectsBlankMentionPromptWithoutCallingTheLlm() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		ErrorFrame error = dispatcher.dispatch(command(room, "@AI   "), room.membership.generation()).orElseThrow();
 
@@ -146,7 +147,7 @@ class CollabMessageDispatcherTest {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.never());
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 0,
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 0,
 				VirtualTimeScheduler.create());
 
 		assertThat(dispatcher.dispatch(command(room, "@AI first"), room.membership.generation())).isEmpty();
@@ -165,7 +166,7 @@ class CollabMessageDispatcherTest {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("", "   "));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI hello"), room.membership.generation());
 
@@ -182,7 +183,7 @@ class CollabMessageDispatcherTest {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just(" ", "answer"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI hello"), room.membership.generation());
 
@@ -201,7 +202,7 @@ class CollabMessageDispatcherTest {
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> cancelled.set(true)), Flux.just("next"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 20, scheduler);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, Duration.ofSeconds(120), 20, scheduler);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
@@ -226,7 +227,7 @@ class CollabMessageDispatcherTest {
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("next"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
@@ -251,7 +252,7 @@ class CollabMessageDispatcherTest {
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)));
-		CollabMessageDispatcher dispatcher = dispatcher(oldRoom.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(oldRoom.registry, llm);
 
 		dispatcher.dispatch(command(oldRoom, "@AI first"), oldRoom.membership.generation());
 		verify(llm, timeout(1000)).streamChat(any());
@@ -282,7 +283,7 @@ class CollabMessageDispatcherTest {
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnCancel(() -> cancelled.set(true)));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		dispatcher.dispatch(command(room, "@AI second"), room.membership.generation());
@@ -314,7 +315,7 @@ class CollabMessageDispatcherTest {
 		Sinks.Many<String> source = Sinks.many().unicast().onBackpressureBuffer();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(source.asFlux());
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		// 첫 턴은 평소대로 시작시킨다 — 이게 뒤에 방송 실패로 방을 닫는 쪽이다.
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
@@ -344,7 +345,7 @@ class CollabMessageDispatcherTest {
 		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
 		TestRoom room = new TestRoom(registry);
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		registry.failBroadcasts = true;
 
 		assertThat(dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation())).isEmpty();
@@ -365,7 +366,7 @@ class CollabMessageDispatcherTest {
 			subscribed.countDown();
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
@@ -386,7 +387,7 @@ class CollabMessageDispatcherTest {
 			subscribed.countDown();
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
@@ -414,7 +415,7 @@ class CollabMessageDispatcherTest {
 			releaseContext.await(1, TimeUnit.SECONDS);
 			return List.of();
 		});
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		try {
 			dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
@@ -452,7 +453,7 @@ class CollabMessageDispatcherTest {
 			releaseContext.await(1, TimeUnit.SECONDS);
 			return List.of();
 		});
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		UUID turnId = UUID.randomUUID();
 
 		try {
@@ -469,14 +470,14 @@ class CollabMessageDispatcherTest {
 	@Test
 	void disposesALateSubscriptionWhenTheGenerationClosedDuringSubscription() {
 		TestRoom room = new TestRoom();
-		AtomicReference<CollabMessageDispatcher> dispatcherRef = new AtomicReference<>();
+		AtomicReference<ThreadMessageDispatcher> dispatcherRef = new AtomicReference<>();
 		AtomicBoolean cancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.defer(() -> {
 			dispatcherRef.get().closeGeneration(room.threadId, room.membership.generation());
 			return Flux.<String>never().doOnCancel(() -> cancelled.set(true));
 		}));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		dispatcherRef.set(dispatcher);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
@@ -490,7 +491,7 @@ class CollabMessageDispatcherTest {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation());
 
@@ -505,7 +506,7 @@ class CollabMessageDispatcherTest {
 		TestRoom room = new TestRoom(registry);
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "일반 발화"), room.membership.generation());
 
@@ -520,7 +521,7 @@ class CollabMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.just("hello", " world"));
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "@AI hi"), room.membership.generation());
 
@@ -540,7 +541,7 @@ class CollabMessageDispatcherTest {
 		when(msgPersistenceService.persistHumanMessageAndFetchContextBlocking(any(), anyLong(), eq(room.threadId), eq(room.userId),
 				eq("@AI 이어서"), anyInt())).thenReturn(List.of(humanHistory, agentHistory));
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "@AI 이어서"), room.membership.generation());
 
@@ -561,7 +562,7 @@ class CollabMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux());
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		firstResponse.tryEmitError(new IllegalStateException("gateway failure"));
@@ -577,7 +578,7 @@ class CollabMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(Flux.never());
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		// dispatch는 큐에 넣고 바로 돌아온다 — 턴이 실제로 시작된 뒤라야 취소할 대상이 있다(#190).
@@ -599,7 +600,7 @@ class CollabMessageDispatcherTest {
 		when(llm.streamChat(any())).thenReturn(source.asFlux().doOnSubscribe(ignored -> subscribed.countDown()));
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId))).thenReturn(pending);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 
 		dispatcher.dispatch(command(room, "@AI first"), room.membership.generation());
 		assertThat(subscribed.await(1, TimeUnit.SECONDS)).isTrue();
@@ -621,7 +622,7 @@ class CollabMessageDispatcherTest {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID clientMsgId = UUID.randomUUID();
 		UUID turnId = UUID.randomUUID();
 
@@ -649,7 +650,7 @@ class CollabMessageDispatcherTest {
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		when(msgPersistenceService.createPendingAgentMessageBlocking(any(), anyLong(), eq(room.threadId)))
 				.thenReturn(pending);
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		UUID first = UUID.randomUUID();
 
 		dispatcher.dispatch(command(room, "@AI first", first), room.membership.generation());
@@ -681,7 +682,7 @@ class CollabMessageDispatcherTest {
 		AtomicBoolean upstreamCancelled = new AtomicBoolean();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID turnId = UUID.randomUUID();
 
 		dispatcher.dispatch(command(room, "@AI first", turnId), room.membership.generation());
@@ -700,7 +701,7 @@ class CollabMessageDispatcherTest {
 		Sinks.One<String> firstResponse = Sinks.one();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux(), Flux.just("never"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 		UUID second = UUID.randomUUID();
 
 		dispatcher.dispatch(command(room, "@AI first", UUID.randomUUID()), room.membership.generation());
@@ -731,7 +732,7 @@ class CollabMessageDispatcherTest {
 			releaseWorker.await(1, TimeUnit.SECONDS);
 			return 0L;
 		});
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
 		UUID turnId = UUID.randomUUID();
 
 		try {
@@ -750,12 +751,170 @@ class CollabMessageDispatcherTest {
 		verify(llm, never()).streamChat(any());
 	}
 
+	/** DIRECT는 멘션 파서를 안 타고 모든 발화에 답하며, HUMAN·AGENT 모두 미리 예약된 msgId·seq를
+	 * 그대로 쓴다(이슈 #162) — process()가 새로 만들지 않는다. */
+	@Test
+	void directDispatchAnswersEveryMessageWithoutAiMentionUsingReservedIds() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "멘션 없는 발화", null, reserved), room.membership.generation());
+
+		awaitFrameCount(room.frames, 3);
+		verify(llm, timeout(1000)).streamChat(any());
+		assertThat(room.frames).filteredOn(ChatMessageFrame.class::isInstance)
+				.extracting(frame -> ((ChatMessageFrame) frame).msgId(), frame -> ((ChatMessageFrame) frame).seq())
+				.containsExactly(tuple(reserved.humanMsgId(), reserved.humanSeq()));
+		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
+				.extracting(frame -> ((ChatAnswerFrame) frame).msgId(), frame -> ((ChatAnswerFrame) frame).seq())
+				.containsOnly(tuple(reserved.agentMsgId(), reserved.agentSeq()));
+		// HUMAN을 다시 저장하지 않는다 — DirectChatTurnService가 이미 저장했다.
+		verify(msgPersistenceService, never()).persistHumanMessageBlocking(any(), anyLong(), any(), any(), any());
+		verify(msgPersistenceService, never()).persistHumanMessageAndFetchContextBlocking(any(), anyLong(), any(),
+				any(), any(), anyInt());
+		// PENDING AGENT도 새로 만들지 않는다 — 이미 예약된 msgId를 그대로 쓴다.
+		verify(msgPersistenceService, never()).createPendingAgentMessageBlocking(any(), anyLong(), any());
+	}
+
+	/** AI FIFO 초과는 DIRECT만 예약된 PENDING AGENT를 즉시 DENIED로 닫고 chat.answer(denied)를
+	 * 방 전체에 방송한다 — COLLAB은 AGENT 행 자체를 안 만든다(대비는 기존 rejectsOnlyThe... 테스트). */
+	@Test
+	void directFifoOverflowDeniesTheReservedAgentAndBroadcastsRoomWide() {
+		TestRoom room = new TestRoom();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.never());
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService, 0);
+		ChatMessageCommand.ReservedTurn first = reservedTurn();
+		ChatMessageCommand.ReservedTurn second = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "first", null, first), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+		dispatcher.dispatch(directCommand(room, "second", null, second), room.membership.generation());
+
+		verify(msgPersistenceService, timeout(1000)).failBlocking(second.agentMsgId(), MsgStatus.DENIED);
+		awaitFrameCount(room.frames, 5);
+		assertThat(room.frames).filteredOn(ErrorFrame.class::isInstance)
+				.extracting(frame -> ((ErrorFrame) frame).code())
+				.contains("RATE_LIMITED");
+		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
+						&& answerFrame.msgId().equals(second.agentMsgId()))
+				.extracting(frame -> ((ChatAnswerFrame) frame).status())
+				.containsExactly(ChatAnswerStatus.DENIED);
+	}
+
+	/** DIRECT는 turnId만으로 취소를 인정한다 — 다른 탭(다른 커넥션)의 재연결·OWNER도 멈출 수
+	 * 있어야 하기 때문이다(이슈 #162). COLLAB의 대비는 ignoresACancelFromAnotherConnection. */
+	@Test
+	void directCancelFromAnotherConnectionStillCancelsTheActiveTurn() {
+		TestRoom room = new TestRoom();
+		AtomicBoolean upstreamCancelled = new AtomicBoolean();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.<String>never().doOnCancel(() -> upstreamCancelled.set(true)));
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		UUID turnId = UUID.randomUUID();
+		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "first", turnId, reserved), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+		// 같은 사용자의 다른 탭(다른 커넥션)이어도 DIRECT는 취소를 인정한다.
+		dispatcher.cancel(room.threadId, room.membership.generation(), turnId, UUID.randomUUID());
+
+		awaitTrue(upstreamCancelled);
+		assertThat(upstreamCancelled).isTrue();
+		verify(msgPersistenceService, timeout(1000)).cancelBlocking(eq(reserved.agentMsgId()), any());
+		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
+						&& answerFrame.msgId().equals(reserved.agentMsgId()))
+				.extracting(frame -> ((ChatAnswerFrame) frame).status())
+				.contains(ChatAnswerStatus.CANCELLED);
+	}
+
+	/** 대기 중(pending)인 DIRECT 턴을 취소하면 COLLAB처럼 chat.queued(cancelled)가 아니라
+	 * 예약된 AGENT의 chat.answer(cancelled)로 알린다(이슈 #162, §3.2). */
+	@Test
+	void directCancelOfAQueuedTurnUsesChatAnswerNotChatQueued() {
+		TestRoom room = new TestRoom();
+		Sinks.One<String> firstResponse = Sinks.one();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux());
+		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
+		when(msgPersistenceService.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, msgPersistenceService);
+		UUID secondTurnId = UUID.randomUUID();
+		ChatMessageCommand.ReservedTurn first = reservedTurn();
+		ChatMessageCommand.ReservedTurn second = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		dispatcher.dispatch(directCommand(room, "second", secondTurnId, second), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+
+		dispatcher.cancel(room.threadId, room.membership.generation(), secondTurnId, room.connectionId);
+
+		verify(msgPersistenceService, timeout(1000)).cancelBlocking(second.agentMsgId(), "");
+		assertThat(room.frames).filteredOn(frame -> frame instanceof ChatAnswerFrame answerFrame
+						&& answerFrame.msgId().equals(second.agentMsgId()))
+				.extracting(frame -> ((ChatAnswerFrame) frame).status())
+				.containsExactly(ChatAnswerStatus.CANCELLED);
+		assertThat(room.frames).filteredOn(ChatQueuedFrame.class::isInstance)
+				.noneMatch(frame -> ((ChatQueuedFrame) frame).status() == ChatQueuedStatus.CANCELLED);
+	}
+
+	@Test
+	void closingTheLastDirectConnectionCancelsReservedTurnsStillInTheInbox() throws InterruptedException {
+		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
+		TestRoom room = new TestRoom(registry);
+		registry.blockOnContent = "blocked before pending";
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm, persistence);
+		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "blocked before pending", UUID.randomUUID(), reserved),
+				room.membership.generation());
+		assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+		room.registry.leave(room.threadId, room.connectionId, room.participant)
+				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+		registry.releaseWorker.countDown();
+
+		verify(persistence, timeout(1000).times(1)).cancelBlocking(reserved.agentMsgId(), "");
+		verify(llm, never()).streamChat(any());
+	}
+
+	@Test
+	void closingTheLastDirectConnectionCancelsQueuedReservedTurns() {
+		TestRoom room = new TestRoom();
+		Sinks.One<String> firstResponse = Sinks.one();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux());
+		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
+		when(persistence.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, persistence);
+		ChatMessageCommand.ReservedTurn first = reservedTurn();
+		ChatMessageCommand.ReservedTurn queued = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+		dispatcher.dispatch(directCommand(room, "queued", UUID.randomUUID(), queued), room.membership.generation());
+		room.registry.leave(room.threadId, room.connectionId, room.participant)
+				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+
+		verify(persistence, timeout(1000).times(1)).cancelBlocking(queued.agentMsgId(), "");
+	}
+
 	@Test
 	void usesTheModelTheMessageAskedForAndFallsBackToTheServerDefault() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("a"), Flux.just("b"));
-		CollabMessageDispatcher dispatcher = dispatcher(room.registry, llm);
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm);
 
 		dispatcher.dispatch(command(room, "@AI one", null, null, "picked-model"), room.membership.generation());
 		dispatcher.dispatch(command(room, "@AI two", null, null, " "), room.membership.generation());
@@ -778,33 +937,50 @@ class CollabMessageDispatcherTest {
 
 		MsgPersistenceService msgPersistenceService = mock(MsgPersistenceService.class);
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new CollabMessageDispatcher(registry, llm, msgPersistenceService, " ",
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, " ",
 						Duration.ofSeconds(1), 0, 20, scheduler));
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new CollabMessageDispatcher(registry, llm, msgPersistenceService, "model",
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "model",
 						Duration.ZERO, 0, 20, scheduler));
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new CollabMessageDispatcher(registry, llm, msgPersistenceService, "model",
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "model",
 						Duration.ofSeconds(1), -1, 20, scheduler));
 		org.assertj.core.api.Assertions.assertThatIllegalArgumentException()
-				.isThrownBy(() -> new CollabMessageDispatcher(registry, llm, msgPersistenceService, "model",
+				.isThrownBy(() -> new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "model",
 						Duration.ofSeconds(1), 0, -1, scheduler));
 	}
 
-	private static CollabMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm) {
+	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm) {
 		return dispatcher(registry, llm, Duration.ofSeconds(120), 20, VirtualTimeScheduler.create());
 	}
 
-	private static CollabMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
+	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
 			Duration timeout, int maxPending, VirtualTimeScheduler scheduler) {
-		return new CollabMessageDispatcher(registry, llm, mock(MsgPersistenceService.class), "test-model", timeout,
+		return new ThreadMessageDispatcher(registry, llm, mock(MsgPersistenceService.class), "test-model", timeout,
 				maxPending, 20, scheduler);
 	}
 
-	private static CollabMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
+	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
 			MsgPersistenceService msgPersistenceService) {
-		return new CollabMessageDispatcher(registry, llm, msgPersistenceService, "test-model",
-				Duration.ofSeconds(120), 20, 20, VirtualTimeScheduler.create());
+		return dispatcher(registry, llm, msgPersistenceService, 20);
+	}
+
+	private static ThreadMessageDispatcher dispatcher(RoomSessionRegistry registry, LlmChatStreamService llm,
+			MsgPersistenceService msgPersistenceService, int maxPending) {
+		return new ThreadMessageDispatcher(registry, llm, msgPersistenceService, "test-model",
+				Duration.ofSeconds(120), maxPending, 20, VirtualTimeScheduler.create());
+	}
+
+	/** DIRECT 전용 — bootstrap 또는 비동기 저장이 미리 예약해뒀다고 가정하는 HUMAN·AGENT 자리. */
+	private static ChatMessageCommand.ReservedTurn reservedTurn() {
+		return new ChatMessageCommand.ReservedTurn(UUID.randomUUID(), 100L, UUID.randomUUID(), 101L);
+	}
+
+	/** DIRECT 발화 — reservedTurn이 항상 채워져 있고, kind가 DIRECT라는 점만 command()와 다르다. */
+	private static ChatMessageCommand directCommand(TestRoom room, String content, UUID turnId,
+			ChatMessageCommand.ReservedTurn reserved) {
+		return new ChatMessageCommand(room.threadId, ThrKind.DIRECT, room.userId, room.participant.subject(),
+				room.participant.displayName(), content, null, null, turnId, room.connectionId, "trace", reserved);
 	}
 
 	private static ChatMessageCommand command(TestRoom room, String content) {
@@ -818,8 +994,9 @@ class CollabMessageDispatcherTest {
 
 	private static ChatMessageCommand command(TestRoom room, String content, UUID clientMsgId, UUID turnId,
 			String model) {
-		return new ChatMessageCommand(room.threadId, room.userId, room.participant.subject(),
-				room.participant.displayName(), content, model, clientMsgId, turnId, room.connectionId, "trace");
+		return new ChatMessageCommand(room.threadId, ThrKind.COLLAB, room.userId, room.participant.subject(),
+				room.participant.displayName(), content, model, clientMsgId, turnId, room.connectionId, "trace",
+				null);
 	}
 
 	/**

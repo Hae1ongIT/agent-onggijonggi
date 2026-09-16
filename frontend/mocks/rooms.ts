@@ -371,11 +371,12 @@ export class MockAiQueue {
     generation: string,
     turnId: string,
     connectionId: string,
+    ownerWide = false,
   ): CancelResult {
     const state = this.rooms.get(this.key(threadId, generation));
     if (!state) return { kind: 'none' };
     const matches = (job: MockAiJob) =>
-      job.turnId === turnId && job.connectionId === connectionId;
+      job.turnId === turnId && (ownerWide || job.connectionId === connectionId);
     if (state.active !== null && matches(state.active)) {
       state.active.cancelled = true;
       return { kind: 'active', job: state.active };

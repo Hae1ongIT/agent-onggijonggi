@@ -5,6 +5,7 @@
 
 import {
   CHAT_CITATIONS_PATH,
+  CHAT_SESSIONS_PATH,
   CHAT_STREAM_PATH,
   bffUrl,
   chatSessionPath,
@@ -13,6 +14,19 @@ import { authFetch } from './http';
 
 /** 채팅 스트리밍 엔드포인트 URL (useChat `api` 에 사용). */
 export const CHAT_STREAM_URL = bffUrl(CHAT_STREAM_PATH);
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+}
+
+/** 1:1 목록은 SSR이 아닌 클라이언트에서 갱신한다(#162). */
+export async function fetchChatSessions(): Promise<ChatSessionSummary[]> {
+  const response = await authFetch(bffUrl(CHAT_SESSIONS_PATH));
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<ChatSessionSummary[]>;
+}
 
 /** 와이어 메시지 모양. */
 export interface WireMessage {

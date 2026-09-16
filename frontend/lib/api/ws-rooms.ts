@@ -37,15 +37,40 @@ export interface RoomListener {
 export interface RoomSubscription {
   /** 프레임 하나를 보낸다. 끊겨 있거나 이미 close()했으면 보내지 않고 false(ws-connection.ts의 send). */
   send: (frame: ClientFrame) => boolean;
-  /** 이 화면의 구독을 푼다. 그 방을 듣는 화면이 더 없으면 서버 구독도 해지한다. */
+  /** 이 화면의 구독을 푼다. 그 방을 듣는 화면이 더 없으면(활성 구독이었으면) 서버 구독도 해지한다. */
   close: () => void;
+}
+
+/**
+ * DIRECT bootstrap 전용 구독(이슈 #162, §2.1). listenRoom은 수신 리스너와 공유 커넥션의
+ * idle-close 방지만 하고, room.subscribe를 보내지 않으며 재연결·NOT_SUBSCRIBED 자동 재구독
+ * 대상에도 넣지 않는다 — 서버가 아직 이 방을 모르기 때문이다(빈 draft일 수 있다).
+ */
+export interface RoomListenSubscription {
+  /** 프레임 하나를 보낸다 — 구독 여부와 무관하게 보낼 수 있다(첫 chat.message는 구독 없이도 허용). */
+  send: (frame: ClientFrame) => boolean;
+  /**
+   * 자기 clientMsgId가 든 chat.message 에코를 받은 뒤 부른다. 두 번째 room.subscribe를 보내지
+   * 않는다 — 서버가 bootstrap 성공 시 이미 이 연결을 자동 구독해뒀다(§2.1). 이 호출은 로컬
+   * 장부에서만 "재연결 대상·NOT_SUBSCRIBED 자동 재구독 대상"으로 승격한다.
+   */
+  promote: () => void;
+  /** 이 화면의 구독을 푼다. 승격 전이었으면 로컬 장부에서만 지운다(서버에 구독한 적이 없다). */
+  close: () => void;
+}
+
+interface RoomEntry {
+  listeners: Set<RoomListener>;
+  /** true면 room.subscribe를 걸었고 재연결·NOT_SUBSCRIBED 복구 대상이다. false는 listenRoom이
+   * 아직 promote되지 않은 상태(이슈 #162) — 서버가 이 방을 모르므로 그 무엇도 재구독하지 않는다. */
+  active: boolean;
 }
 
 export function createRoomHub(
   openConnection: typeof openWsConnection = openWsConnection,
   idleCloseMs = IDLE_CLOSE_MS,
 ) {
-  const listeners = new Map<string, Set<RoomListener>>();
+  const rooms = new Map<string, RoomEntry>();
   let connection: WsConnection | null = null;
   let isOpen = false;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -58,18 +83,19 @@ export function createRoomHub(
     const frame = parseFrameFromText(data);
     if (frame === null || frame.type === 'pong') return;
     const { threadId } = frame;
+    const entry = threadId === null ? undefined : rooms.get(threadId);
     if (
       frame.type === 'error' &&
       frame.code === NOT_SUBSCRIBED_CODE &&
       threadId !== null &&
-      listeners.has(threadId)
+      entry?.active
     ) {
       sendFrame({ type: 'room.subscribe', threadId });
     }
     const targets =
       threadId === null
-        ? [...listeners.values()].flatMap((set) => [...set])
-        : [...(listeners.get(threadId) ?? [])];
+        ? [...rooms.values()].flatMap((entry) => [...entry.listeners])
+        : [...(entry?.listeners ?? [])];
     for (const listener of targets) listener.onFrame(frame);
   };
 
@@ -77,11 +103,15 @@ export function createRoomHub(
     if (connection !== null) return;
     const opened = openConnection({
       onMessage: route,
-      rooms: () => [...listeners.keys()],
+      // 재연결 뒤 다시 걸 방은 active뿐이다 — listenRoom(미승격)은 서버가 아직 몰라 대상이 아니다.
+      rooms: () =>
+        [...rooms.entries()]
+          .filter(([, entry]) => entry.active)
+          .map(([threadId]) => threadId),
       onOpenChange: (open) => {
         isOpen = open;
-        for (const set of listeners.values()) {
-          for (const listener of set) listener.onOpenChange?.(open);
+        for (const entry of rooms.values()) {
+          for (const listener of entry.listeners) listener.onOpenChange?.(open);
         }
       },
       // 스스로 끝난 커넥션(정상 종료·재로그인)은 다시 살아나지 않는다 — 다음 구독이 새로 열게 버린다.
@@ -94,24 +124,37 @@ export function createRoomHub(
     connection = opened;
   };
 
+  const clearIdleTimer = () => {
+    if (idleTimer === null) return;
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  };
+
+  const scheduleIdleCloseIfEmpty = () => {
+    if (rooms.size > 0) return;
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      connection?.close();
+      connection = null;
+      isOpen = false;
+    }, idleCloseMs);
+  };
+
   const subscribeRoom = (
     threadId: string,
     listener: RoomListener,
   ): RoomSubscription => {
-    if (idleTimer !== null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
+    clearIdleTimer();
     ensureConnection();
 
-    let roomListeners = listeners.get(threadId);
-    if (roomListeners === undefined) {
-      roomListeners = new Set();
-      listeners.set(threadId, roomListeners);
+    let entry = rooms.get(threadId);
+    if (entry === undefined) {
+      entry = { listeners: new Set(), active: true };
+      rooms.set(threadId, entry);
       // 열려 있으면 지금 건다. 아직 열리지 않았으면 보내지지 않고(false), 열릴 때 rooms()로 걸린다.
       sendFrame({ type: 'room.subscribe', threadId });
     }
-    roomListeners.add(listener);
+    entry.listeners.add(listener);
     if (isOpen) listener.onOpenChange?.(true);
 
     let closed = false;
@@ -120,27 +163,62 @@ export function createRoomHub(
       close: () => {
         if (closed) return;
         closed = true;
-        const current = listeners.get(threadId);
+        const current = rooms.get(threadId);
         if (current === undefined) return;
-        current.delete(listener);
-        if (current.size > 0) return;
-        listeners.delete(threadId);
-        sendFrame({ type: 'room.unsubscribe', threadId });
-        if (listeners.size > 0) return;
-        idleTimer = setTimeout(() => {
-          idleTimer = null;
-          connection?.close();
-          connection = null;
-          isOpen = false;
-        }, idleCloseMs);
+        current.listeners.delete(listener);
+        if (current.listeners.size > 0) return;
+        rooms.delete(threadId);
+        if (current.active) sendFrame({ type: 'room.unsubscribe', threadId });
+        scheduleIdleCloseIfEmpty();
       },
     };
   };
 
-  return { subscribeRoom };
+  /** DIRECT bootstrap 전용 — room.subscribe를 보내지 않고 커넥션·리스너만 연다(이슈 #162). */
+  const listenRoom = (
+    threadId: string,
+    listener: RoomListener,
+  ): RoomListenSubscription => {
+    clearIdleTimer();
+    ensureConnection();
+
+    let entry = rooms.get(threadId);
+    if (entry === undefined) {
+      entry = { listeners: new Set(), active: false };
+      rooms.set(threadId, entry);
+    }
+    entry.listeners.add(listener);
+    if (isOpen) listener.onOpenChange?.(true);
+
+    let closed = false;
+    return {
+      send: (frame) => !closed && sendFrame(frame),
+      promote: () => {
+        const current = rooms.get(threadId);
+        if (current !== undefined) current.active = true;
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        const current = rooms.get(threadId);
+        if (current === undefined) return;
+        current.listeners.delete(listener);
+        if (current.listeners.size > 0) return;
+        rooms.delete(threadId);
+        // active로 승격된 뒤 닫히는 것도 정상 흐름이라(#162 승격 후 화면 이탈), 그 경우만 해지한다.
+        if (current.active) sendFrame({ type: 'room.unsubscribe', threadId });
+        scheduleIdleCloseIfEmpty();
+      },
+    };
+  };
+
+  return { subscribeRoom, listenRoom };
 }
 
 const sharedHub = createRoomHub();
 
 /** 탭 하나가 공유하는 허브로 방 하나를 구독한다. */
 export const subscribeRoom = sharedHub.subscribeRoom;
+
+/** 탭 하나가 공유하는 허브로 DIRECT bootstrap 전용 리스너를 연다(이슈 #162). */
+export const listenRoom = sharedHub.listenRoom;

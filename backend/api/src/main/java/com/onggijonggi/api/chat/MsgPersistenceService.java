@@ -19,9 +19,9 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Class Name : MsgPersistenceService.java
  * Description : msg(V11__message.sql) 저장 로직(03·CORE, 이슈 #18). 전부 블로킹 JPA 호출이라
- *               메서드 이름에 Blocking을 붙인다 — 호출부(CollabMessageDispatcher)가
+ *               메서드 이름에 Blocking을 붙인다 — 호출부(ThreadMessageDispatcher)가
  *               Mono.fromCallable(...).subscribeOn(boundedElastic())로 감싸야 함을 이름으로
- *               드러내기 위함이다. 협업방 경로의 seq는 호출부(CollabMessageDispatcher)가 블록으로
+ *               드러내기 위함이다. 협업방 경로의 seq는 호출부(ThreadMessageDispatcher)가 블록으로
  *               미리 예약해 넘긴다(이슈 #190) — 방송 프레임에 seq를 실어야 해서 저장을 기다릴 수
  *               없기 때문이다. 그래서 이 클래스는 협업 메시지의 채번을 더 이상 하지 않고,
  *               예약해놓고 쓰지 않은 번호가 구멍으로 남는 것을 전제한다.

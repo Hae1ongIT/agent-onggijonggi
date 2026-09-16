@@ -39,8 +39,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Class Name : CollabWebSocketHandlerTest.java
- * Description : 이슈 #3 — /api/ws의 실제 프로덕션 배선(WsSecurityConfig + CollabWebSocketHandler)을
+ * Class Name : ThreadWebSocketHandlerTest.java
+ * Description : 이슈 #3 — /api/ws의 실제 프로덕션 배선(WsSecurityConfig + ThreadWebSocketHandler)을
  *               서브프로토콜 인증 기준으로 검증한다. 이슈 #7 스파이크가 확인했던 "인증 컨텍스트가
  *               메시지 루프까지 전파된다"는 사실을, Authorization 헤더가 아니라 Sec-WebSocket-Protocol
  *               조건에서 다시 확인한다.
@@ -54,7 +54,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Import({ChatControllerTest.FakeChatModelConfig.class, FakeJwtDecoderConfig.class, CollabRoomFixture.class,
 		FakeKeycloakAdminConfig.class})
 @ExtendWith(ThreadDumpOnStallExtension.class)
-class CollabWebSocketHandlerTest {
+class ThreadWebSocketHandlerTest {
 
 	private static final String ALLOWED_ORIGIN = "http://localhost:3000";
 
@@ -445,7 +445,7 @@ class CollabWebSocketHandlerTest {
 	/**
 	* RoomSessionRegistry.evict(이슈 #135)가 보낸 kicked 신호로 그 방 구독만 풀리는지 확인한다(이슈 #161).
 	* 참가자 제거 흐름(ThreadParticipantService)이 evict를 부르는 배선은 별도라, 여기서는 evict를 직접
-	* 호출해 CollabWebSocketHandler 쪽 처리만 본다 — 제거된 방에는 FORBIDDEN이 오고, 같은 커넥션의 다른
+	* 호출해 ThreadWebSocketHandler 쪽 처리만 본다 — 제거된 방에는 FORBIDDEN이 오고, 같은 커넥션의 다른
 	* 방은 계속 발화를 주고받는다.
 	*
 	* evict 호출 시점은 두 방의 참여자 스냅샷 수신을 기다려 맞춘다 — 스냅샷을 받았다는 것 자체가 서버의
@@ -491,7 +491,7 @@ class CollabWebSocketHandlerTest {
 	}
 
 	/**
-	* 위 테스트가 CollabWebSocketHandler 쪽 처리만 좁혀 봤다면, 이 테스트는 참가자 제거 REST
+	* 위 테스트가 ThreadWebSocketHandler 쪽 처리만 좁혀 봤다면, 이 테스트는 참가자 제거 REST
 	* 엔드포인트(ThreadParticipantService.remove)가 evict까지 실제로 부르는 배선(이슈 #135)이
 	* 이어져 있는지를 REST 호출 하나로 확인한다. 제거 뒤에도 커넥션이 살아 ping에 답한다(이슈 #161).
 	*/

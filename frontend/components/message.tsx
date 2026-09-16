@@ -6,7 +6,7 @@
  스트리밍 대기 중 보여주는 ThinkingMessage도 이 파일에서 함께 관리한다.
  *********************************************************/
 
-import type { ChatRequestOptions, Message } from 'ai';
+import type { Message } from 'ai';
 import cx from 'classnames';
 import equal from 'fast-deep-equal';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -29,24 +29,24 @@ const PurePreviewMessage = ({
   isLoading,
   isLastMessage,
   citations,
+  terminalStatus,
   failed,
   onResend,
-  setMessages,
-  reload,
+  onAppendTurn,
+  regenerateContent,
 }: {
   chatId: string;
   message: Message;
   isLoading: boolean;
   isLastMessage: boolean;
   citations?: CitationsState;
+  /** DIRECT 전용(이슈 #162, §3.2) — DENIED는 실패 안내, CANCELLED는 본문 유무에 따라
+   * "중단됨" 배지 또는 빈 말풍선 대신 중단 안내로 갈린다. */
+  terminalStatus?: 'cancelled' | 'denied';
   failed?: boolean;
   onResend?: () => void;
-  setMessages: (
-    messages: Message[] | ((messages: Message[]) => Message[]),
-  ) => void;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
+  onAppendTurn: (content: string) => void;
+  regenerateContent?: string;
 }) => {
   const [mode, setMode] = useState<'view' | 'edit'>('view');
 
@@ -107,6 +107,22 @@ const PurePreviewMessage = ({
               </div>
             )}
 
+            {/* CANCELLED — 본문이 있으면 위에서 이미 그린 말풍선에 "중단됨"만 덧붙이고, 본문이
+             * 없으면(위 블록은 message.content를 요구해 아무것도 안 그린다) 빈 말풍선 대신 이
+             * 안내가 유일한 표시가 된다(이슈 #162, §3.2). */}
+            {message.role === 'assistant' && terminalStatus === 'cancelled' && (
+              <span className="text-sm text-muted-foreground">
+                응답이 중단되었습니다.
+              </span>
+            )}
+
+            {/* DENIED는 AGENT 행 자체가 본문 없이 끝나 항상 이 안내로만 보인다(이슈 #162, §3.2). */}
+            {message.role === 'assistant' && terminalStatus === 'denied' && (
+              <span className="text-sm text-destructive">
+                요청이 많아 이번 응답은 처리되지 않았습니다. 다시 시도해 주세요.
+              </span>
+            )}
+
             {message.role === 'user' && citations && (
               <CitationsPanel state={citations} />
             )}
@@ -133,8 +149,7 @@ const PurePreviewMessage = ({
                   key={message.id}
                   message={message}
                   setMode={setMode}
-                  setMessages={setMessages}
-                  reload={reload}
+                  onAppendTurn={onAppendTurn}
                 />
               </div>
             )}
@@ -145,7 +160,11 @@ const PurePreviewMessage = ({
               message={message}
               isLoading={isLoading}
               isLastMessage={isLastMessage}
-              reload={reload}
+              onRegenerate={() => {
+                if (regenerateContent !== undefined) {
+                  onAppendTurn(regenerateContent);
+                }
+              }}
             />
           </div>
         </div>
@@ -161,6 +180,7 @@ export const PreviewMessage = memo(
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;
     if (!equal(prevProps.citations, nextProps.citations)) return false;
+    if (prevProps.terminalStatus !== nextProps.terminalStatus) return false;
     if (prevProps.failed !== nextProps.failed) return false;
 
     return true;

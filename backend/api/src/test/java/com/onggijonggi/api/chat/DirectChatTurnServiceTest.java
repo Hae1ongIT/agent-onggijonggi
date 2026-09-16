@@ -97,7 +97,8 @@ class DirectChatTurnServiceTest {
 	void persistsCompletedAgentAtTheReservedSequenceOnlyAfterStreamCompletion() {
 		UUID agentMessageId = UUID.randomUUID();
 		UUID threadId = UUID.randomUUID();
-		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(agentMessageId, threadId, 7L);
+		DirectChatTurnService.StoredTurn turn = new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 6L,
+				agentMessageId, threadId, 7L);
 		when(msgRepository.save(any(Msg.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
 		service.persistCompletedAgentReplyBlocking(turn, "완료된 응답");

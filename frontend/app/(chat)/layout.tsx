@@ -8,9 +8,7 @@ import { cookies } from 'next/headers';
 
 import { AppSidebar } from '@/components/app-sidebar';
 import { AuthButton } from '@/components/auth-button';
-import { ReauthBanner } from '@/components/reauth-banner';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
-import { fetchSessionsForServer } from '@/lib/api/server-history';
 
 export const experimental_ppr = true;
 
@@ -22,22 +20,11 @@ export default async function Layout({
 }) {
   const cookieStore = await cookies();
   const isCollapsed = cookieStore.get('sidebar:state')?.value !== 'true';
-  const serverSessions = await fetchSessionsForServer();
 
   return (
     <SidebarProvider defaultOpen={!isCollapsed}>
-      <AppSidebar
-        authSlot={<AuthButton />}
-        serverSessions={serverSessions ?? []}
-      />
-      <SidebarInset>
-        {serverSessions === null && (
-          <div className="p-2">
-            <ReauthBanner />
-          </div>
-        )}
-        {children}
-      </SidebarInset>
+      <AppSidebar authSlot={<AuthButton />} />
+      <SidebarInset>{children}</SidebarInset>
     </SidebarProvider>
   );
 }

@@ -64,7 +64,7 @@ class WsOriginHandshakeTest {
 	}
 
 	/** 유효한 토큰을 서브프로토콜로 실어 붙고, 핸들러가 돌려주는 첫 프레임을 꺼내온다
-	 * (CollabWebSocketHandlerTest와 같은 방식 — 그쪽 주석에 서브프로토콜 구성 이유가 있다). */
+	 * (ThreadWebSocketHandlerTest와 같은 방식 — 그쪽 주석에 서브프로토콜 구성 이유가 있다). */
 	private String connect(HttpHeaders headers) {
 		String token = TestJwtSupport.signedJwt("origin-allowed-user", List.of("USER"));
 		AtomicReference<String> received = new AtomicReference<>();

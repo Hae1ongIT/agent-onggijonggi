@@ -21,7 +21,7 @@ import reactor.core.publisher.Sinks;
 /**
  * Class Name : RoomSessionRegistry.java
  * Description : 방 단위 연결과 프레임 방송을 in-memory로 관리한다. WebSocketSession은
- *               {@link CollabWebSocketHandler}가 소유하며, in-memory sink 기반이라 단일
+ *               {@link ThreadWebSocketHandler}가 소유하며, in-memory sink 기반이라 단일
  *               서버 프로세스만 지원한다. 다중 인스턴스는 pub/sub와 분산 순서 보장이 필요하다.
  *               입퇴장 방송(이슈 #25)도 여기서 낸다 — 누가 방에 있는지 아는 곳이 여기뿐이라,
  *               "이미 있던 사람에게만 알린다"는 판단을 멤버십 변경과 같은 잠금 안에서 해야 한다.
@@ -60,14 +60,27 @@ public class RoomSessionRegistry {
 	 * 않는다는 뜻이고, 그래서 방의 첫 입장자에게도 그대로 내려보낼 수 있다. 명단은 멤버십을
 	 * 바꾼 잠금 안에서 뜬다 — 밖에서 뜨면 그 사이에 들어온 사람이 명단에도 없고 입장 통보도
 	 * 못 받는 연결이 생긴다.
+	 *
+	 * COLLAB 호출부는 그대로 이 3-인자 오버로드를 쓴다(presence 방송 유지).
 	 */
 	public RoomMembership join(UUID threadId, UUID connectionId, PresenceParticipant participant) {
+		return join(threadId, connectionId, participant, true);
+	}
+
+	/**
+	 * DIRECT 전용 진입점(이슈 #162) — presenceEnabled가 false면 이 방은 만들어지는 순간부터
+	 * presence.join·presence.snapshot·presence.leave를 전혀 방송하지 않는다. 방 하나의
+	 * presence 여부는 그 방을 처음 만든 join()이 정하고 수명 내내 바뀌지 않는다 — 같은 방에
+	 * 두 값이 섞이면 어떤 탭은 알림을 받고 어떤 탭은 못 받는 모순이 생긴다.
+	 */
+	public RoomMembership join(UUID threadId, UUID connectionId, PresenceParticipant participant,
+			boolean presenceEnabled) {
 		List<PresenceParticipant> participants = new ArrayList<>();
 		Sinks.One<Void> kicked = Sinks.one();
 		Sinks.One<Void> left = Sinks.one();
 		RoomState room = rooms.compute(threadId, (ignored, current) -> {
-			RoomState joined = current == null ? new RoomState(presenceLeaveDebounce) : current;
-			if (joined.add(connectionId, participant, kicked, left)) {
+			RoomState joined = current == null ? new RoomState(presenceLeaveDebounce, presenceEnabled) : current;
+			if (joined.add(connectionId, participant, kicked, left) && joined.presenceEnabled) {
 				joined.emitPresence(
 						new PresenceJoinFrame(threadId, participant.subject(), participant.displayName()));
 			}
@@ -93,7 +106,7 @@ public class RoomSessionRegistry {
 	/**
 	 * 참가자 명단에서 그 subject를 빼는 일(#20의 remove·leaveSelf)이 이미 벌어진 뒤 호출된다 —
 	 * 여기서는 그 사람이 지금 이 방에 걸어 둔 구독(탭이 여럿이면 전부)에 강제 해지 신호만 보낸다.
-	 * 실제로 구독을 푸는 것은 그 신호를 구독하는 {@link CollabWebSocketHandler} 몫이다(이슈 #135).
+	 * 실제로 구독을 푸는 것은 그 신호를 구독하는 {@link ThreadWebSocketHandler} 몫이다(이슈 #135).
 	 * 커넥션은 닫지 않는다 — 한 커넥션이 여러 방을 나르므로 다른 방까지 끊긴다(이슈 #161).
 	 *
 	 * @return 신호를 받은 연결이 하나라도 있으면 {@code true} — 이미 연결이 없던 사람(초대만
@@ -180,7 +193,7 @@ public class RoomSessionRegistry {
 
 	/**
 	 * 이 연결이 방에 대해 아는 전부. snapshot은 연결이 붙는 순간의 명단이고, frames는 그 뒤로
-	 * 방에서 일어나는 일이다 — 둘을 이어 붙여 내보내는 것은 {@link CollabWebSocketHandler}가 한다.
+	 * 방에서 일어나는 일이다 — 둘을 이어 붙여 내보내는 것은 {@link ThreadWebSocketHandler}가 한다.
 	 * kicked는 이 연결 하나에만 오는 강제 해지 신호다(evict, 이슈 #135) — frames와 달리 방 전체가
 	 * 아니라 이 connectionId로만 간다. left는 이 연결이 방에서 빠지는 순간 완료된다(이슈 #161) —
 	 * 커넥션이 살아 있어도 구독이 풀리면 frames를 그만 받아야 하는데, 방에 남은 사람이 있으면 frames
@@ -228,14 +241,19 @@ public class RoomSessionRegistry {
 
 		private final Duration leaveDebounce;
 
+		/** DIRECT 방은 이 방이 처음 만들어질 때부터 false다(이슈 #162) — join·leave 모두 이 값을
+		 * 보고 presence 프레임 자체를 만들지 않는다. */
+		private final boolean presenceEnabled;
+
 		private boolean active = true;
 
 		private final Sinks.Many<WsFrame> frames = Sinks.many()
 				.multicast()
 				.onBackpressureBuffer(WARMUP_BUFFER_SIZE, false);
 
-		RoomState(Duration leaveDebounce) {
+		RoomState(Duration leaveDebounce, boolean presenceEnabled) {
 			this.leaveDebounce = leaveDebounce;
+			this.presenceEnabled = presenceEnabled;
 		}
 
 		/**
@@ -317,6 +335,9 @@ public class RoomSessionRegistry {
 		 * 실제로 도는 콜백은 그동안 재연결이 없었다는 뜻이라 다시 확인할 필요가 없다.
 		 */
 		synchronized void scheduleDeparture(UUID threadId, PresenceParticipant participant) {
+			if (!presenceEnabled) {
+				return;
+			}
 			String subject = participant.subject();
 			PendingDeparture previous = pendingLeaves.remove(subject);
 			if (previous != null) {
@@ -342,7 +363,7 @@ public class RoomSessionRegistry {
 
 		/**
 		 * 그 subject가 지금 들고 있는 연결(탭이 여럿이면 전부) 각각의 kicked 신호를 완료시킨다.
-		 * 실제 연결 제거는 하지 않는다 — 신호를 받은 CollabWebSocketHandler가 그 구독을 풀며
+		 * 실제 연결 제거는 하지 않는다 — 신호를 받은 ThreadWebSocketHandler가 그 구독을 풀며
 		 * {@link RoomSessionRegistry#leave}를 불러 자연히 빠진다.
 		 */
 		synchronized boolean evict(String subject) {

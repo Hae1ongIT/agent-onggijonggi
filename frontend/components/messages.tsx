@@ -3,7 +3,7 @@
  설 명 : 메시지 목록 스크롤 영역. 대화가 없으면 Overview를, 있으면 메시지들을, 응답 대기 중이면 ThinkingMessage를 렌더링한다.
  *********************************************************/
 
-import { ChatRequestOptions, Message } from 'ai';
+import { Message } from 'ai';
 import equal from 'fast-deep-equal';
 import { memo, useEffect, useRef, useState } from 'react';
 
@@ -17,14 +17,11 @@ interface MessagesProps {
   isLoading: boolean;
   messages: Array<Message>;
   citationsByMessageId: Record<string, CitationsState>;
+  /** DIRECT 전용(이슈 #162, §3.2) — done이 아닌 message.id만 들어 있다. */
+  terminalStatusByMessageId: Record<string, 'cancelled' | 'denied'>;
   failedMessageIds: string[];
   onResendFailedMessage: (messageId: string) => void;
-  setMessages: (
-    messages: Message[] | ((messages: Message[]) => Message[]),
-  ) => void;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
+  onAppendTurn: (content: string) => void;
 }
 
 /** 마지막 메시지가 user이고 아직 로딩 중이면 ThinkingMessage로 대기 상태를 보여준다. */
@@ -33,10 +30,10 @@ function PureMessages({
   isLoading,
   messages,
   citationsByMessageId,
+  terminalStatusByMessageId,
   failedMessageIds,
   onResendFailedMessage,
-  setMessages,
-  reload,
+  onAppendTurn,
 }: MessagesProps) {
   const [messagesContainerRef, messagesEndRef] =
     useScrollToBottom<HTMLDivElement>();
@@ -79,13 +76,21 @@ function PureMessages({
           isLoading={isLoading && messages.length - 1 === index}
           isLastMessage={messages.length - 1 === index}
           citations={citationsByMessageId[message.id]}
+          terminalStatus={terminalStatusByMessageId[message.id]}
           failed={
             index === messages.length - 1 &&
             failedMessageIds.includes(message.id)
           }
           onResend={() => onResendFailedMessage(message.id)}
-          setMessages={setMessages}
-          reload={reload}
+          onAppendTurn={onAppendTurn}
+          regenerateContent={
+            message.role === 'assistant'
+              ? messages
+                  .slice(0, index)
+                  .reverse()
+                  .find((candidate) => candidate.role === 'user')?.content
+              : undefined
+          }
         />
       ))}
 
@@ -107,6 +112,13 @@ export const Messages = memo(PureMessages, (prevProps, nextProps) => {
   if (prevProps.messages.length !== nextProps.messages.length) return false;
   if (!equal(prevProps.messages, nextProps.messages)) return false;
   if (!equal(prevProps.citationsByMessageId, nextProps.citationsByMessageId))
+    return false;
+  if (
+    !equal(
+      prevProps.terminalStatusByMessageId,
+      nextProps.terminalStatusByMessageId,
+    )
+  )
     return false;
   if (!equal(prevProps.failedMessageIds, nextProps.failedMessageIds))
     return false;

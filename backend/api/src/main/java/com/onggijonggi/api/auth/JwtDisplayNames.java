@@ -8,7 +8,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
  *               요청의 토큰에서 새로 읽으므로, Keycloak에서 이름이 바뀌면 다음 요청부터 곧바로
  *               반영된다.
  *
- *               HTTP 경로({@link CurrentActorProvider})와 WebSocket 핸드셰이크(CollabWebSocketHandler)가
+ *               HTTP 경로({@link CurrentActorProvider})와 WebSocket 핸드셰이크(ThreadWebSocketHandler)가
  *               같은 규칙을 써야 해서 여기로 모았다 — 두 경로가 다른 이름을 내면 같은 사람이
  *               화면에서 둘로 보인다.
  */

@@ -25,7 +25,7 @@ public class LlmRiskClassifier implements RiskClassifier {
 	private final String modelId;
 
 	public LlmRiskClassifier(ChatClient.Builder chatClientBuilder,
-			@Value("${app.collab.risk-check.model:${app.collab.ai.model:${spring.ai.openai.chat.options.model}}}")
+			@Value("${app.collab.risk-check.model:${app.thread.ai.model:${spring.ai.openai.chat.options.model}}}")
 			String modelId) {
 		this.chatClient = chatClientBuilder.build();
 		this.modelId = modelId;

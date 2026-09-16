@@ -31,13 +31,13 @@ import { useEffect, useState } from 'react';
 
 import { CitationsPanel } from '@/components/citations-panel';
 import { Markdown } from '@/components/markdown';
+import { NoticeBanner } from '@/components/notice-banner';
 import { SidebarToggle } from '@/components/sidebar-toggle';
 import { useScrollToBottom } from '@/components/use-scroll-to-bottom';
 import { fetchCollabThreads } from '@/lib/api/collab';
 import type {
   CollabMessage,
   CollabPresenceNotice,
-  SystemNotice,
 } from '@/lib/collab/room-state';
 import { isForbidden, isPresenceNotice } from '@/lib/collab/room-state';
 import {
@@ -100,33 +100,6 @@ function MessageRow({ message }: { message: CollabMessage }) {
       ) : (
         <p className="whitespace-pre-wrap text-sm">{message.content}</p>
       )}
-    </div>
-  );
-}
-
-/** 방 위에 얹히는 시스템 알림(#29). 닫기 전까지 남는다 — 사후에 오는 알림이라 지나가면
- * 놓치기 때문이다. traceId는 문의할 때 쓰라고 title로만 남긴다. */
-function NoticeBanner({
-  notice,
-  onDismiss,
-}: {
-  notice: SystemNotice;
-  onDismiss: () => void;
-}) {
-  return (
-    <div
-      role="alert"
-      title={notice.traceId}
-      className="flex items-center gap-3 border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive"
-    >
-      <span className="flex-1">{notice.message}</span>
-      <button
-        type="button"
-        className="shrink-0 underline underline-offset-2"
-        onClick={onDismiss}
-      >
-        닫기
-      </button>
     </div>
   );
 }

@@ -47,7 +47,8 @@ export interface ChatAnswerFrame {
   delta: string;
   citations: Citation[];
   restrictedResultsOmitted: boolean;
-  status: 'streaming' | 'done';
+  /** cancelled·denied는 DIRECT 전용이다(이슈 #162) — COLLAB은 지금처럼 streaming·done만 쓴다. */
+  status: 'streaming' | 'done' | 'cancelled' | 'denied';
 }
 
 /** 참여자 간 일반 대화 메시지. AI 호출 라우팅 정책은 이슈 #13에서 결정 중. */

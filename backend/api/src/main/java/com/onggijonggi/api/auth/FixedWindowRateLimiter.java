@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Class Name : FixedWindowRateLimiter.java
  * Description : 키별 in-memory 고정 윈도우 카운터. 세는 일만 하고 초과를 어떻게 알릴지는 모른다 —
  *               HTTP는 429 응답으로(RateLimitWebFilter), WS 메시지는 ErrorFrame으로
- *               (CollabWebSocketHandler, 이슈 #74) 서로 다르게 알리기 때문이다.
+ *               (ThreadWebSocketHandler, 이슈 #74) 서로 다르게 알리기 때문이다.
  *
  *               <b>인스턴스 하나가 버킷 하나다.</b> 카운터가 인스턴스 필드라 인스턴스를 나누는 것이
  *               곧 정책을 나누는 것이고, 이 클래스를 싱글턴 빈으로 만들어 여러 정책이 함께 쓰면
