@@ -32,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -276,6 +277,71 @@ class ThreadWebSocketHandlerUnitTest {
 
 		assertThat(sent).singleElement().asString()
 				.contains("\"code\":\"NOT_SUBSCRIBED\"", "\"threadId\":\"" + threadId + "\"");
+	}
+
+	/**
+	* 기존 DIRECT 방에 이어 쓰다가 HUMAN·PENDING AGENT 예약 저장 자체가 실패하면(이슈 #162, §2.2)
+	* 아직 아무것도 방송되지 않았으므로 요청자에게만 오류를 주는 대신, 방 전체에 warning
+	* system.notice(MESSAGE_DELIVERY_FAILED)를 방송해 다른 탭도 배너로 알 수 있게 한다.
+	*/
+	@Test
+	void broadcastsDeliveryFailedNoticeWhenExistingDirectReservationFails() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		UUID userId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		var directChatTurnService = mock(DirectChatTurnService.class);
+		ThreadMembershipService membership = mock(ThreadMembershipService.class);
+		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
+		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
+		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
+		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any()))
+				.thenThrow(new IllegalStateException("database unavailable"));
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		Principal principal = () -> "direct-user";
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just(principal));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("direct-user")).thenReturn(Mono.just(userId));
+		stubTextMessages(session);
+		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.subscribeFrame(threadId)),
+				inboundText(WsTestExchange.chatMessageFrame(threadId, "안녕"))));
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+
+		UUID observerId = UUID.randomUUID();
+		RoomSessionRegistry.RoomMembership observer =
+				registry.join(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
+		CountDownLatch noticeReceived = new CountDownLatch(1);
+		AtomicReference<SystemNoticeFrame> notice = new AtomicReference<>();
+		var observerSubscription = observer.frames().subscribe(frame -> {
+			if (frame instanceof SystemNoticeFrame systemNotice
+					&& "MESSAGE_DELIVERY_FAILED".equals(systemNotice.code())) {
+				notice.set(systemNotice);
+				noticeReceived.countDown();
+			}
+		});
+
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.never());
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
+				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
+				Schedulers.parallel());
+		ThreadWebSocketHandler handler = new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				provisioning, membership, directChatTurnService, Clock.systemUTC(), WINDOW_SECONDS,
+				MESSAGES_PER_WINDOW);
+
+		try {
+			handler.handle(session).block();
+
+			assertThat(noticeReceived.await(1, TimeUnit.SECONDS)).isTrue();
+			assertThat(notice.get().severity()).isEqualTo("warning");
+			assertThat(notice.get().threadId()).isEqualTo(threadId);
+		} finally {
+			observerSubscription.dispose();
+			registry.leave(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
+		}
 	}
 
 	/** 클라이언트가 올려보내는 텍스트 프레임 한 장. */
