@@ -262,6 +262,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		// bootstrap 후보다(이슈 #162) — 그 경로로 넘긴다.
 		Optional<UUID> roomGeneration = roomSessionRegistry.generationFor(threadId, connection.id());
 		if (roomGeneration.isEmpty()) {
+			if (inbound.clientMsgId() == null || inbound.turnId() == null) {
+				return Mono.just(malformed(threadId, traceId));
+			}
 			return bootstrapDirect(threadId, connection, actor, inbound, traceId);
 		}
 
@@ -281,7 +284,12 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 								"이 방에 메시지를 보낼 권한이 없습니다.", traceId));
 					}
 					if (kind.get() == ThrKind.DIRECT) {
-						return reserveDirectTurn(threadId, connection.userId(), inbound.content())
+						if (inbound.clientMsgId() == null || inbound.turnId() == null) {
+							return Mono.just(malformed(threadId, traceId));
+						}
+						return threadMembershipService.isActiveDirectOwner(threadId, connection.userId())
+								.flatMap(owner -> owner
+										? reserveDirectTurn(threadId, connection.userId(), inbound.content())
 								.flatMap(reserved -> rejectIfLocked(
 										new ChatMessageCommand(threadId, kind.get(), connection.userId(),
 												actor.subject(), actor.displayName(), inbound.content(),
@@ -289,7 +297,9 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 												connection.id(), traceId, reserved),
 										roomGeneration.get(), traceId))
 								.onErrorResume(error -> reportDirectReserveFailure(threadId, roomGeneration.get(),
-										inbound.turnId(), traceId, error));
+										inbound.turnId(), traceId, error))
+										: Mono.just(new ErrorFrame(threadId, "FORBIDDEN",
+												"이 방에 메시지를 보낼 권한이 없습니다.", traceId)));
 					}
 					ChatMessageCommand command = new ChatMessageCommand(threadId, kind.get(), connection.userId(),
 							actor.subject(), actor.displayName(), inbound.content(), inbound.model(),
@@ -400,10 +410,25 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		if (inbound.threadId() == null || inbound.turnId() == null) {
 			return Mono.just(malformed(inbound.threadId(), traceId));
 		}
-		roomSessionRegistry.generationFor(inbound.threadId(), connection.id())
-				.ifPresent(generation -> threadMessageDispatcher.cancel(inbound.threadId(), generation,
-						inbound.turnId(), connection.id()));
-		return Mono.empty();
+		Optional<UUID> generation = roomSessionRegistry.generationFor(inbound.threadId(), connection.id());
+		if (generation.isEmpty()) {
+			return Mono.empty();
+		}
+		return threadMembershipService.kindOf(inbound.threadId())
+				.flatMap(kind -> {
+					if (kind.filter(value -> value == ThrKind.DIRECT).isPresent()) {
+						return threadMembershipService.isActiveDirectOwner(inbound.threadId(), connection.userId())
+								.flatMap(owner -> owner
+										? Mono.<WsFrame>fromRunnable(() -> threadMessageDispatcher.cancel(inbound.threadId(),
+												generation.get(), inbound.turnId(), connection.id()))
+										: Mono.just(new ErrorFrame(inbound.threadId(), "FORBIDDEN",
+												"이 방의 AI 응답을 취소할 권한이 없습니다.", traceId)));
+					}
+					if (kind.isPresent()) {
+						threadMessageDispatcher.cancel(inbound.threadId(), generation.get(), inbound.turnId(), connection.id());
+					}
+					return Mono.empty();
+				});
 	}
 
 	/**
@@ -425,7 +450,17 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 		}
 		return threadMembershipService.isActiveParticipant(threadId, connection.userId())
 				.flatMap(participant -> participant
-						? Mono.<WsFrame>fromRunnable(() -> subscribe(connection, threadId))
+						? threadMembershipService.kindOf(threadId).flatMap(kind -> {
+							if (kind.filter(value -> value == ThrKind.DIRECT).isPresent()) {
+								return threadMembershipService.isActiveDirectOwner(threadId, connection.userId())
+										.flatMap(owner -> owner
+												? Mono.<WsFrame>fromRunnable(() -> subscribe(connection, threadId, false))
+												: Mono.just(new ErrorFrame(threadId, "FORBIDDEN", "이 방에 들어갈 권한이 없습니다.", traceId)));
+							}
+							return kind.isPresent()
+									? Mono.<WsFrame>fromRunnable(() -> subscribe(connection, threadId))
+									: Mono.just(new ErrorFrame(threadId, "FORBIDDEN", "이 방에 들어갈 권한이 없습니다.", traceId));
+						})
 						: Mono.just(new ErrorFrame(threadId, "FORBIDDEN", "이 방에 들어갈 권한이 없습니다.", traceId)))
 				.onErrorResume(error -> {
 					log.error("WebSocket room subscription failed threadId={} traceId={}", threadId, traceId, error);

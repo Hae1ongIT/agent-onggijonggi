@@ -25,6 +25,7 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -208,12 +209,22 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMembershipService membership = mock(ThreadMembershipService.class);
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.COLLAB)));
+		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
+		return membership;
+	}
+
+	private static ThreadMembershipService admittingDirectOwner() {
+		ThreadMembershipService membership = mock(ThreadMembershipService.class);
+		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
+		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
+		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		return membership;
 	}
 
 	@Test
-	void answersRateLimitedAndKeepsTheConnectionWhenMessagesComeTooFast() {
+	void answersRateLimitedAndKeepsTheConnectionWhenMessagesComeTooFast() throws InterruptedException {
 		UUID threadId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
 		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
@@ -222,21 +233,33 @@ class ThreadWebSocketHandlerUnitTest {
 		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
 		Principal principal = () -> "chatty-user";
 		List<String> sent = new CopyOnWriteArrayList<>();
+		CountDownLatch rateLimited = new CountDownLatch(1);
+		Sinks.Many<WebSocketMessage> inbound = Sinks.many().unicast().onBackpressureBuffer();
 
 		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just(principal));
 		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
 		when(provisioning.resolveOrProvision("chatty-user")).thenReturn(Mono.just(userId));
 		stubTextMessages(session);
 		// 한도가 1이라 두 번째 발화부터 걸린다. 구독은 발화가 아니라 세지 않는다.
-		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.subscribeFrame(threadId)),
-				inboundText(WsTestExchange.chatMessageFrame(threadId, "첫 발화")),
-				inboundText(WsTestExchange.chatMessageFrame(threadId, "둘째 발화"))));
 		when(session.send(any())).thenAnswer(invocation -> Flux.from(
 				invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
-				.doOnNext(message -> sent.add(message.getPayloadAsText())).then());
+				.doOnNext(message -> {
+					sent.add(message.getPayloadAsText());
+					if (message.getPayloadAsText().contains("\"code\":\"RATE_LIMITED\"")) {
+						rateLimited.countDown();
+					}
+				}).then());
 		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+		when(session.receive()).thenReturn(inbound.asFlux());
 
-		handler(registry, provisioning, 1).handle(session).block();
+		Mono<Void> completion = handler(registry, provisioning, 1).handle(session).cache();
+		completion.subscribe();
+		inbound.tryEmitNext(inboundText(WsTestExchange.subscribeFrame(threadId)));
+		inbound.tryEmitNext(inboundText(WsTestExchange.chatMessageFrame(threadId, "first message")));
+		inbound.tryEmitNext(inboundText(WsTestExchange.chatMessageFrame(threadId, "second message")));
+		assertThat(rateLimited.await(2, TimeUnit.SECONDS)).isTrue();
+		inbound.tryEmitComplete();
+		completion.block();
 
 		// 초과한 발화에는 RATE_LIMITED가 돌아간다.
 		assertThat(sent).anyMatch(text -> text.contains("\"code\":\"RATE_LIMITED\""));
@@ -295,6 +318,7 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMembershipService membership = mock(ThreadMembershipService.class);
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.DIRECT)));
+		when(membership.isActiveDirectOwner(any(), any())).thenReturn(Mono.just(true));
 		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any()))
 				.thenThrow(new IllegalStateException("database unavailable"));
@@ -454,6 +478,67 @@ class ThreadWebSocketHandlerUnitTest {
 			observerSubscription.dispose();
 			registry.leave(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
 		}
+	}
+
+	@Test
+	void reconnectingToAnExistingDirectRoomSubscribesWithoutPresence() {
+		UUID threadId = UUID.randomUUID();
+		UUID userId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		ThreadMembershipService membership = admittingDirectOwner();
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		List<String> sent = new CopyOnWriteArrayList<>();
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just((Principal) () -> "direct-owner"));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("direct-owner")).thenReturn(Mono.just(userId));
+		stubTextMessages(session);
+		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.subscribeFrame(threadId))));
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(
+				invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
+				.doOnNext(message -> sent.add(message.getPayloadAsText())).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(Flux.never());
+		ThreadMessageDispatcher dispatcher = new ThreadMessageDispatcher(registry, llm,
+				mock(MsgPersistenceService.class), "test-model", Duration.ofSeconds(120), 20, 20,
+				Schedulers.parallel());
+		ThreadWebSocketHandler handler = new ThreadWebSocketHandler(new JsonMapper(), registry, dispatcher,
+				provisioning, membership, mock(DirectChatTurnService.class), Clock.systemUTC(), WINDOW_SECONDS,
+				MESSAGES_PER_WINDOW);
+
+		handler.handle(session).block();
+
+		assertThat(sent).noneMatch(frame -> frame.contains("\"type\":\"presence."));
+	}
+
+	@Test
+	void rejectsDirectBootstrapWithoutClientIdsBeforePersisting() {
+		UUID threadId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		var directChatTurnService = mock(DirectChatTurnService.class);
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		List<String> sent = new CopyOnWriteArrayList<>();
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just((Principal) () -> "draft-owner"));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("draft-owner")).thenReturn(Mono.just(UUID.randomUUID()));
+		stubTextMessages(session);
+		when(session.receive()).thenReturn(Flux.just(inboundText("{\"type\":\"chat.message\",\"threadId\":\""
+				+ threadId + "\",\"content\":\"hello\"}")));
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(
+				invocation.<org.reactivestreams.Publisher<WebSocketMessage>>getArgument(0))
+				.doOnNext(message -> sent.add(message.getPayloadAsText())).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+
+		handler(registry, provisioning, MESSAGES_PER_WINDOW, directChatTurnService).handle(session).block();
+
+		assertThat(sent).singleElement().asString().contains("\"code\":\"MALFORMED_REQUEST\"");
+		verify(directChatTurnService, never()).prepareOrCreateWithPendingAgentBlocking(any(), any(), any(), any());
 	}
 
 	/** 클라이언트가 올려보내는 텍스트 프레임 한 장. */

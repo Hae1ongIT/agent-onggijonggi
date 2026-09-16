@@ -52,7 +52,12 @@ final class WsTestExchange {
 
 	/** 그 방으로 가는 발화 한 장. 인바운드 chat.message는 방을 threadId로 가리킨다(이슈 #161). */
 	static String chatMessageFrame(UUID threadId, String content) {
-		return "{\"type\":\"chat.message\",\"threadId\":\"" + threadId + "\",\"content\":\"" + content + "\"}";
+		return chatMessageFrame(threadId, content, UUID.randomUUID(), UUID.randomUUID());
+	}
+
+	static String chatMessageFrame(UUID threadId, String content, UUID clientMsgId, UUID turnId) {
+		return "{\"type\":\"chat.message\",\"threadId\":\"" + threadId + "\",\"content\":\"" + content
+				+ "\",\"clientMsgId\":\"" + clientMsgId + "\",\"turnId\":\"" + turnId + "\"}";
 	}
 
 	static Mono<Void> exchange(WebSocketSession session,

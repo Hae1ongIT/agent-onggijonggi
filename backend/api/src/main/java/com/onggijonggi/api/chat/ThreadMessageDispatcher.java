@@ -151,13 +151,18 @@ public class ThreadMessageDispatcher {
 				}
 				// 워커가 꺼내기 전에 도착한 취소도 받을 수 있게 큐에 넣는 순간 등록한다(cancel 주석).
 				// 인바운드는 연결마다 순서대로 처리되므로, 같은 연결의 chat.cancel은 이 등록 뒤에 온다.
+				QueuedMessage queued = new QueuedMessage(command, prompt, new AtomicBoolean());
 				TurnRef ref = prompt == null ? null : TurnRef.of(command.turnId(), command.connectionId());
 				if (ref != null) {
-					state.inFlight.put(ref, false);
+					state.inFlight.put(ref, new InFlightTurn(queued, false));
 				}
-				if (state.inbox.tryEmitNext(new QueuedMessage(command, prompt)).isFailure()) {
+				if (state.inbox.tryEmitNext(queued).isFailure()) {
 					if (ref != null) {
 						state.inFlight.remove(ref);
+					}
+					if (command.kind() == ThrKind.DIRECT && command.reservedTurn() != null) {
+						persistDirectReservedAgentTerminal(command.reservedTurn(), queued.terminalPersisted(),
+								MsgStatus.CANCELLED);
 					}
 					return Optional.of(new ErrorFrame(command.threadId(), "RATE_LIMITED",
 							"이 방의 메시지 대기열이 가득 찼습니다.", command.traceId()));
@@ -209,7 +214,7 @@ public class ThreadMessageDispatcher {
 				: persistHumanMessageAndFetchContext(msgId, seq, command);
 		PendingTurn pendingTurn = new PendingTurn(command.threadId(), key.roomGeneration(), queued.prompt(),
 				command.traceId(), TurnRef.of(command.turnId(), command.connectionId()), command.model(), context,
-				direct ? reserved : null);
+				direct ? reserved : null, queued.terminalPersisted());
 		ActiveTurn turnToStart = null;
 		boolean admitted = false;
 		// 등록 해제와 대기열 추가를 한 락 안에서 한다 — 사이가 벌어지면 그 틈에 온 취소가 어디서도
@@ -219,8 +224,8 @@ public class ThreadMessageDispatcher {
 			// 여기까지 오면 더 이상 "워커가 꼺지 않은" 발화가 아니다 — 아래 어느 가지로 가든
 			// 이 발화의 처리는 여기서 끝난다.
 			state.unprocessedAiTurns -= 1;
-			boolean cancelledBeforeQueue = pendingTurn.ref() != null
-					&& Boolean.TRUE.equals(state.inFlight.remove(pendingTurn.ref()));
+			InFlightTurn inFlight = pendingTurn.ref() == null ? null : state.inFlight.remove(pendingTurn.ref());
+			boolean cancelledBeforeQueue = inFlight != null && inFlight.cancelled();
 			if (state.closed) {
 				// 저장만 하고 끝낸다 — DIRECT는 예약해둔 PENDING AGENT가 영영 PENDING으로 남지
 				// 않도록 CANCELLED로 정리한다.
@@ -284,6 +289,17 @@ public class ThreadMessageDispatcher {
 	private void finishDirectReservedAgent(RoomKey key, PendingTurn turn, MsgStatus terminalStatus,
 			ChatAnswerStatus answerStatus) {
 		ChatMessageCommand.ReservedTurn reserved = turn.reservedTurn();
+		persistDirectReservedAgentTerminal(reserved, turn.terminalPersisted(), terminalStatus);
+		broadcastQuietly(key, new ChatAnswerFrame(key.threadId(), reserved.agentMsgId(), turn.turnId(),
+				modelIdFor(turn), reserved.agentSeq(), "", List.of(), false, answerStatus));
+	}
+
+	/** 예약된 DIRECT AGENT의 terminal 전이는 큐·대기·활성 어느 경로에서도 한 번만 실행한다. */
+	private void persistDirectReservedAgentTerminal(ChatMessageCommand.ReservedTurn reserved,
+			AtomicBoolean terminalPersisted, MsgStatus terminalStatus) {
+		if (!terminalPersisted.compareAndSet(false, true)) {
+			return;
+		}
 		Mono.fromRunnable(() -> {
 					if (terminalStatus == MsgStatus.CANCELLED) {
 						msgPersistenceService.cancelBlocking(reserved.agentMsgId(), "");
@@ -295,8 +311,6 @@ public class ThreadMessageDispatcher {
 				.doOnError(e -> log.error("DIRECT 예약 AGENT 종료 저장 실패 msgId={}", reserved.agentMsgId(), e))
 				.onErrorComplete()
 				.subscribe();
-		broadcastQuietly(key, new ChatAnswerFrame(key.threadId(), reserved.agentMsgId(), turn.turnId(),
-				modelIdFor(turn), reserved.agentSeq(), "", List.of(), false, answerStatus));
 	}
 
 	private static ChatQueuedFrame queuedFrame(PendingTurn turn, ChatQueuedStatus status) {
@@ -363,11 +377,11 @@ public class ThreadMessageDispatcher {
 			if (direct) {
 				TurnRef inFlightRef = findInFlightByTurnId(state, turnId);
 				if (inFlightRef != null) {
-					state.inFlight.put(inFlightRef, true);
+					state.inFlight.computeIfPresent(inFlightRef, (ignored, queued) -> queued.cancel());
 					return;
 				}
 			} else if (state.inFlight.containsKey(ref)) {
-				state.inFlight.put(ref, true);
+				state.inFlight.computeIfPresent(ref, (ignored, queued) -> queued.cancel());
 				return;
 			}
 			boolean activeMatches = direct
@@ -606,6 +620,8 @@ public class ThreadMessageDispatcher {
 
 	private void closeGeneration(RoomKey key, RoomAiState state, boolean notifyPendingCancellation) {
 		ActiveTurn activeTurn;
+		List<PendingTurn> pendingTurns;
+		List<InFlightTurn> inFlightTurns;
 		boolean waitingTurnsCancelled;
 		synchronized (state) {
 			if (state.closed) {
@@ -617,7 +633,10 @@ public class ThreadMessageDispatcher {
 			// 워커가 아직 꺼내지 않은 @AI 발화는 pending에 없고 inFlight에만 있다. 그 상태에서 앞 턴이
 			// 방송 실패로 방을 닫으면 그 발화는 조용히 사라지고 보낸 사람은 아무 설명도 못 받았다.
 			waitingTurnsCancelled = !state.pending.isEmpty() || state.unprocessedAiTurns > 0;
+			pendingTurns = new ArrayList<>(state.pending);
+			inFlightTurns = new ArrayList<>(state.inFlight.values());
 			state.pending.clear();
+			state.inFlight.clear();
 			activeTurn = state.active;
 			state.active = null;
 		}
@@ -627,6 +646,20 @@ public class ThreadMessageDispatcher {
 		if (activeTurn != null) {
 			activeTurn.subscription.dispose();
 			persistAgentCancellation(activeTurn);
+		}
+		if (state.kind == ThrKind.DIRECT) {
+			pendingTurns.forEach(turn -> {
+				if (turn.reservedTurn() != null) {
+					persistDirectReservedAgentTerminal(turn.reservedTurn(), turn.terminalPersisted(),
+							MsgStatus.CANCELLED);
+				}
+			});
+			inFlightTurns.forEach(turn -> {
+				ChatMessageCommand.ReservedTurn reserved = turn.queued().command().reservedTurn();
+				if (reserved != null) {
+					persistDirectReservedAgentTerminal(reserved, turn.queued().terminalPersisted(), MsgStatus.CANCELLED);
+				}
+			});
 		}
 		if (notifyPendingCancellation && waitingTurnsCancelled) {
 			try {
@@ -768,7 +801,15 @@ public class ThreadMessageDispatcher {
 	}
 
 	/** 워커가 꺼내 처리할 한 건. prompt가 null이면 AI 턴을 만들지 않는다(일반 발화·빈 프롬프트). */
-	private record QueuedMessage(ChatMessageCommand command, String prompt) {
+	private record QueuedMessage(ChatMessageCommand command, String prompt, AtomicBoolean terminalPersisted) {
+	}
+
+	/** inbox에 들어간 예약 DIRECT 턴은 worker가 꺼내기 전에도 terminal 상태를 공유해야 한다. */
+	private record InFlightTurn(QueuedMessage queued, boolean cancelled) {
+
+		InFlightTurn cancel() {
+			return new InFlightTurn(queued, true);
+		}
 	}
 
 	/**
@@ -776,7 +817,8 @@ public class ThreadMessageDispatcher {
 	* 채운다 — `DirectChatTurnService`가 이미 만든 PENDING AGENT를 가리킨다(이슈 #162).
 	*/
 	private record PendingTurn(UUID threadId, UUID roomGeneration, String prompt, String traceId, TurnRef ref,
-			String model, Mono<List<Msg>> context, ChatMessageCommand.ReservedTurn reservedTurn) {
+			String model, Mono<List<Msg>> context, ChatMessageCommand.ReservedTurn reservedTurn,
+			AtomicBoolean terminalPersisted) {
 
 		UUID turnId() {
 			return ref == null ? null : ref.turnId();
@@ -810,10 +852,11 @@ public class ThreadMessageDispatcher {
 		private final long seq;
 
 		/** 완료/실패 저장이 이 턴에 대해 이미 한 번 시도됐는지 — 두 번째 시도는 조용히 건너뛴다. */
-		private final AtomicBoolean terminalPersisted = new AtomicBoolean();
+		private final AtomicBoolean terminalPersisted;
 
 		ActiveTurn(PendingTurn turn, SeqBlock seqBlock) {
 			this.turn = turn;
+			this.terminalPersisted = turn.terminalPersisted();
 			if (turn.reservedTurn() != null) {
 				// DIRECT — PENDING AGENT는 DirectChatTurnService가 이미 만들어뒀다(이슈 #162).
 				// 새로 만들지 않고 그 msgId·seq를 그대로 쓴다.
@@ -854,7 +897,7 @@ public class ThreadMessageDispatcher {
 		* 큐에 넣었지만 워커가 아직 꺼내지 않은 {@code @AI} 발화(이슈 #160). 값이 true면 그 사이에 취소됐다.
 		* 워커가 꺼낼 때 지운다.
 		*/
-		private final Map<TurnRef, Boolean> inFlight = new HashMap<>();
+		private final Map<TurnRef, InFlightTurn> inFlight = new HashMap<>();
 
 		/**
 		* 큐에 넣었지만 워커가 아직 처리하지 않은 {@code @AI} 발화 수(이슈 #206). 방이 닫힐 때

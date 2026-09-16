@@ -1,6 +1,7 @@
 package com.onggijonggi.api.chat;
 
 import com.onggijonggi.common.chat.domain.ThrMbrStatus;
+import com.onggijonggi.common.chat.domain.ThrMbrRole;
 import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrStatus;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
@@ -41,6 +42,17 @@ public class ThreadMembershipService {
 		return Mono.fromCallable(() ->
 						thrMbrRepository.existsByThrIdAndUserIdAndStatus(threadId, userId, ThrMbrStatus.ACTIVE)
 								&& thrRepository.existsByIdAndKind(threadId, ThrKind.COLLAB))
+				.subscribeOn(Schedulers.boundedElastic());
+	}
+
+	/** DIRECT는 소유자 열과 ACTIVE OWNER 멤버십이 모두 일치해야 한다. */
+	public Mono<Boolean> isActiveDirectOwner(UUID threadId, UUID userId) {
+		return Mono.fromCallable(() -> thrRepository.findById(threadId)
+				.filter(thread -> thread.getKind() == ThrKind.DIRECT
+						&& userId.equals(thread.getDrcOwnUserId()))
+				.flatMap(thread -> thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, userId,
+						ThrMbrRole.OWNER, ThrMbrStatus.ACTIVE))
+				.isPresent())
 				.subscribeOn(Schedulers.boundedElastic());
 	}
 

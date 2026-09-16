@@ -868,6 +868,48 @@ class ThreadMessageDispatcherTest {
 	}
 
 	@Test
+	void closingTheLastDirectConnectionCancelsReservedTurnsStillInTheInbox() throws InterruptedException {
+		FailingRoomSessionRegistry registry = new FailingRoomSessionRegistry();
+		TestRoom room = new TestRoom(registry);
+		registry.blockOnContent = "blocked before pending";
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
+		ThreadMessageDispatcher dispatcher = dispatcher(registry, llm, persistence);
+		ChatMessageCommand.ReservedTurn reserved = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "blocked before pending", UUID.randomUUID(), reserved),
+				room.membership.generation());
+		assertThat(registry.workerBlocked.await(1, TimeUnit.SECONDS)).isTrue();
+		room.registry.leave(room.threadId, room.connectionId, room.participant)
+				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+		registry.releaseWorker.countDown();
+
+		verify(persistence, timeout(1000).times(1)).cancelBlocking(reserved.agentMsgId(), "");
+		verify(llm, never()).streamChat(any());
+	}
+
+	@Test
+	void closingTheLastDirectConnectionCancelsQueuedReservedTurns() {
+		TestRoom room = new TestRoom();
+		Sinks.One<String> firstResponse = Sinks.one();
+		LlmChatStreamService llm = mock(LlmChatStreamService.class);
+		when(llm.streamChat(any())).thenReturn(firstResponse.asMono().flux());
+		MsgPersistenceService persistence = mock(MsgPersistenceService.class);
+		when(persistence.recentCompleteContextBlocking(eq(room.threadId), anyInt())).thenReturn(List.of());
+		ThreadMessageDispatcher dispatcher = dispatcher(room.registry, llm, persistence);
+		ChatMessageCommand.ReservedTurn first = reservedTurn();
+		ChatMessageCommand.ReservedTurn queued = reservedTurn();
+
+		dispatcher.dispatch(directCommand(room, "first", UUID.randomUUID(), first), room.membership.generation());
+		verify(llm, timeout(1000)).streamChat(any());
+		dispatcher.dispatch(directCommand(room, "queued", UUID.randomUUID(), queued), room.membership.generation());
+		room.registry.leave(room.threadId, room.connectionId, room.participant)
+				.ifPresent(generation -> dispatcher.closeGeneration(room.threadId, generation));
+
+		verify(persistence, timeout(1000).times(1)).cancelBlocking(queued.agentMsgId(), "");
+	}
+
+	@Test
 	void usesTheModelTheMessageAskedForAndFallsBackToTheServerDefault() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);

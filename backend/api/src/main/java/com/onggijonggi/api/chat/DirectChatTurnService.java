@@ -90,8 +90,8 @@ public class DirectChatTurnService {
 		if (thread.getKind() != ThrKind.DIRECT || !userId.equals(thread.getDrcOwnUserId())) {
 			throw notFound();
 		}
-		ThrMbr owner = thrMbrRepository.findByThrIdAndUserIdAndStatus(thread.getId(), userId, ThrMbrStatus.ACTIVE)
-				.orElseThrow(DirectChatTurnService::notFound);
+		ThrMbr owner = thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(thread.getId(), userId,
+				ThrMbrRole.OWNER, ThrMbrStatus.ACTIVE).orElseThrow(DirectChatTurnService::notFound);
 		return persistTurn(thread, owner, content, createPendingAgent);
 	}
 
