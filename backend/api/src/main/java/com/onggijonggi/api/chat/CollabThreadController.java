@@ -8,18 +8,12 @@ import com.onggijonggi.common.chat.domain.ThrKind;
 import com.onggijonggi.common.chat.domain.ThrMbr;
 import com.onggijonggi.common.chat.domain.ThrMbrStatus;
 import com.onggijonggi.common.chat.domain.ThrStatus;
-import com.onggijonggi.common.chat.domain.Msg;
-import com.onggijonggi.common.chat.persistence.MsgRepository;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
-import com.onggijonggi.common.user.AppUser;
-import com.onggijonggi.common.user.AppUserRepository;
 import jakarta.validation.Valid;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
@@ -36,7 +30,6 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -44,7 +37,9 @@ import reactor.core.scheduler.Schedulers;
 /**
  * Class Name : CollabThreadController.java
  * Description : 협업 스레드 조회·참가자 관리 계약 구현체. 1:1 대화를 다루는 ChatController와 저장
- *               테이블도 소유 모델도 달라 컨트롤러를 나눈다.
+ *               테이블도 소유 모델도 달라 컨트롤러를 나눈다. DIRECT·COLLAB 공용 이력 조회는
+ *               `ThreadController`가 따로 맡는다(이슈 #219) — 이 클래스는 이제 진짜로 COLLAB
+ *               전용이다.
  *
  *               방을 만드는 경로는 아직 여기 없다 — 부를 화면이 없어 이슈 #23과 함께 진행한다
  *               (이슈 #22 코멘트). 그래서 참가자 관리는 이미 있는 방 위에서만 동작한다.
@@ -66,30 +61,27 @@ public class CollabThreadController {
 	private final CurrentActorProvider currentActorProvider;
 	private final ThrRepository thrRepository;
 	private final ThrMbrRepository thrMbrRepository;
-	private final MsgRepository msgRepository;
 	private final ThreadMembershipService threadMembershipService;
 	private final ThreadParticipantService threadParticipantService;
 	private final ThreadLifecycleService threadLifecycleService;
 	private final KeycloakAdminClient keycloakAdminClient;
 	private final CollabThreadCreationService collabThreadCreationService;
-	private final AppUserRepository appUserRepository;
+	private final ThreadMessageQueryService threadMessageQueryService;
 
 	public CollabThreadController(CurrentActorProvider currentActorProvider, ThrRepository thrRepository,
-			ThrMbrRepository thrMbrRepository, MsgRepository msgRepository,
-			ThreadMembershipService threadMembershipService,
+			ThrMbrRepository thrMbrRepository, ThreadMembershipService threadMembershipService,
 			ThreadParticipantService threadParticipantService, ThreadLifecycleService threadLifecycleService,
 			KeycloakAdminClient keycloakAdminClient, CollabThreadCreationService collabThreadCreationService,
-			AppUserRepository appUserRepository) {
+			ThreadMessageQueryService threadMessageQueryService) {
 		this.currentActorProvider = currentActorProvider;
 		this.thrRepository = thrRepository;
 		this.thrMbrRepository = thrMbrRepository;
-		this.msgRepository = msgRepository;
 		this.threadMembershipService = threadMembershipService;
 		this.threadParticipantService = threadParticipantService;
 		this.threadLifecycleService = threadLifecycleService;
 		this.keycloakAdminClient = keycloakAdminClient;
 		this.collabThreadCreationService = collabThreadCreationService;
-		this.appUserRepository = appUserRepository;
+		this.threadMessageQueryService = threadMessageQueryService;
 	}
 
 	/**
@@ -312,8 +304,8 @@ public class CollabThreadController {
 	}
 
 	/**
-	* 참가자가 아니거나 존재하지 않는 스레드면 404 — listMessages(ChatController)와 같은 이유로 존재
-	* 여부를 노출하지 않는다.
+	* 레거시 COLLAB 전용 이력 조회 — 공용 참가자 판정을 쓰는 `ThreadController.listThreadMessages`와
+	* 인가만 다르고, 조회·표시 이름 해석은 `ThreadMessageQueryService`를 함께 쓴다(이슈 #219).
 	*
 	* afterSeq를 주면 그 값보다 큰 seq만 돌려준다(이슈 #190). 방 진입 때는 생략해 전부 받고,
 	* 재접속 때는 마지막으로 받은 seq를 넘겨 끊긴 동안의 것만 따라잡는다 — 방송은 그 순간 붙어
@@ -325,83 +317,8 @@ public class CollabThreadController {
 		return currentActorProvider.currentActor()
 				.map(CurrentActor::userId)
 				.flatMap(userId -> threadMembershipService.isActiveCollabParticipant(threadId, userId))
-				.flatMapMany(participant -> listMessagesForParticipant(threadId, afterSeq, participant));
-	}
-
-	/** DIRECT·COLLAB ACTIVE 참가자가 공통 msg 이력을 raw athKind 계약으로 읽는 새 경로다. */
-	@GetMapping("/api/threads/{threadId}/messages")
-	public Flux<MsgItem> listThreadMessages(@PathVariable UUID threadId,
-			@RequestParam(name = "afterSeq", required = false) Long afterSeq) {
-		return currentActorProvider.currentActor()
-				.map(CurrentActor::userId)
-				.flatMap(userId -> threadMembershipService.isActiveParticipant(threadId, userId))
-				.flatMapMany(participant -> listMessagesForParticipant(threadId, afterSeq, participant));
-	}
-
-	private Flux<MsgItem> listMessagesForParticipant(UUID threadId, Long afterSeq, boolean participant) {
-		if (!participant) {
-			return Flux.error(new ResponseStatusException(HttpStatus.NOT_FOUND));
-		}
-		if (afterSeq != null && afterSeq < 0) {
-			return Flux.error(new ResponseStatusException(HttpStatus.BAD_REQUEST));
-		}
-		return Mono.fromCallable(() -> afterSeq == null
-						? msgRepository.findByThrIdOrderBySeqAsc(threadId)
-						: msgRepository.findByThrIdAndSeqGreaterThanOrderBySeqAsc(threadId, afterSeq))
-				.subscribeOn(Schedulers.boundedElastic())
-				.flatMap(this::withAuthorDisplayNames)
-				.flatMapMany(Flux::fromIterable);
-	}
-
-	/**
-	* HUMAN 메시지의 thrMbrId → userId → keycloakSubj를 한 번에 모아 조회하고, subject도 중복
-	* 없이 조회한다(#128의 summariesFor와 같은 이유) — 같은 사람이 여러 메시지를 썼다고 Keycloak
-	* Admin API를 그만큼 부르면 안 된다. AGENT·SYSTEM은 thrMbrId가 없어 표시 이름도 null이다.
-	*/
-	private Mono<List<MsgItem>> withAuthorDisplayNames(List<Msg> messages) {
-		return Mono.fromCallable(() -> resolveThrMbrIdToSubject(messages))
-				.subscribeOn(Schedulers.boundedElastic())
-				.flatMap(subjectByThrMbrId -> {
-					Set<String> subjects = Set.copyOf(subjectByThrMbrId.values());
-					return Flux.fromIterable(subjects)
-							.flatMap(subject -> keycloakAdminClient.displayName(subject)
-									.map(displayName -> Map.entry(subject, displayName.orElse(subject))),
-									DISPLAY_NAME_LOOKUP_CONCURRENCY)
-							.collectMap(Map.Entry::getKey, Map.Entry::getValue)
-							.map(displayNameBySubject -> messages.stream()
-									.map(msg -> MsgItem.from(msg, subjectByThrMbrId.get(msg.getThrMbrId()),
-											displayNameFor(msg, subjectByThrMbrId, displayNameBySubject)))
-									.toList());
-				});
-	}
-
-	/** thrMbrId가 없는(AGENT·SYSTEM) 메시지는 subject도 없어 여기서 null로 끝난다. */
-	private String displayNameFor(Msg msg, Map<UUID, String> subjectByThrMbrId, Map<String, String> displayNameBySubject) {
-		String subject = subjectByThrMbrId.get(msg.getThrMbrId());
-		return subject == null ? null : displayNameBySubject.get(subject);
-	}
-
-	/** thrMbrId → 그 참가자의 Keycloak subject. thr_mbr을 거쳐 app_user까지 두 번 조회한다. */
-	private Map<UUID, String> resolveThrMbrIdToSubject(List<Msg> messages) {
-		List<UUID> thrMbrIds = messages.stream().map(Msg::getThrMbrId).filter(Objects::nonNull).distinct()
-				.toList();
-		if (thrMbrIds.isEmpty()) {
-			return Map.of();
-		}
-		List<ThrMbr> thrMbrs = thrMbrRepository.findAllById(thrMbrIds);
-		Map<UUID, UUID> userIdByThrMbrId = thrMbrs.stream()
-				.collect(Collectors.toMap(ThrMbr::getId, ThrMbr::getUserId));
-		List<UUID> userIds = List.copyOf(Set.copyOf(userIdByThrMbrId.values()));
-		Map<UUID, String> subjectByUserId = appUserRepository.findAllById(userIds).stream()
-				.collect(Collectors.toMap(AppUser::getId, AppUser::getKeycloakSubj));
-		Map<UUID, String> subjectByThrMbrId = new HashMap<>();
-		userIdByThrMbrId.forEach((thrMbrId, userId) -> {
-			String subject = subjectByUserId.get(userId);
-			if (subject != null) {
-				subjectByThrMbrId.put(thrMbrId, subject);
-			}
-		});
-		return subjectByThrMbrId;
+				.flatMapMany(participant -> threadMessageQueryService.listMessagesForParticipant(threadId, afterSeq,
+						participant));
 	}
 
 }
