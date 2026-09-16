@@ -208,6 +208,7 @@ class ThreadWebSocketHandlerUnitTest {
 		ThreadMembershipService membership = mock(ThreadMembershipService.class);
 		when(membership.isActiveParticipant(any(), any())).thenReturn(Mono.just(true));
 		when(membership.kindOf(any())).thenReturn(Mono.just(Optional.of(ThrKind.COLLAB)));
+		when(membership.isOpenForWriting(any())).thenReturn(Mono.just(true));
 		return membership;
 	}
 
@@ -338,6 +339,117 @@ class ThreadWebSocketHandlerUnitTest {
 			assertThat(noticeReceived.await(1, TimeUnit.SECONDS)).isTrue();
 			assertThat(notice.get().severity()).isEqualTo("warning");
 			assertThat(notice.get().threadId()).isEqualTo(threadId);
+		} finally {
+			observerSubscription.dispose();
+			registry.leave(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
+		}
+	}
+
+	/**
+	* 새 DIRECT 방 동시 생성 경합(이슈 #162, §2.1) — 첫 시도가 PK 충돌로 실패하면
+	* `prepareExistingWithPendingAgentBlocking`으로 재조회해 이어쓴다. 재조회까지 성공하면
+	* bootstrap이 정상 완료돼 발화가 방송된다.
+	*/
+	@Test
+	void retriesBootstrapWithExistingThreadAfterCreateIdCollision() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		UUID userId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		var directChatTurnService = mock(DirectChatTurnService.class);
+		when(directChatTurnService.prepareOrCreateWithPendingAgentBlocking(any(), any(), any(), any()))
+				.thenThrow(new org.springframework.dao.DataIntegrityViolationException("duplicate"));
+		when(directChatTurnService.prepareExistingWithPendingAgentBlocking(eq(threadId), any(), any()))
+				.thenReturn(new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 0L, UUID.randomUUID(), threadId,
+						1L));
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		Principal principal = () -> "collision-user";
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just(principal));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("collision-user")).thenReturn(Mono.just(userId));
+		stubTextMessages(session);
+		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.chatMessageFrame(threadId, "안녕"))));
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+
+		UUID observerId = UUID.randomUUID();
+		RoomSessionRegistry.RoomMembership observer =
+				registry.join(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
+		CountDownLatch messageBroadcast = new CountDownLatch(1);
+		var observerSubscription = observer.frames().subscribe(frame -> {
+			if (frame instanceof ChatMessageFrame chatMessage && "안녕".equals(chatMessage.content())) {
+				messageBroadcast.countDown();
+			}
+		});
+
+		ThreadWebSocketHandler handler = handler(registry, provisioning, MESSAGES_PER_WINDOW, directChatTurnService);
+
+		try {
+			handler.handle(session).block();
+
+			assertThat(messageBroadcast.await(1, TimeUnit.SECONDS)).isTrue();
+			verify(directChatTurnService).prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕");
+		} finally {
+			observerSubscription.dispose();
+			registry.leave(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
+		}
+	}
+
+	/**
+	* bootstrap이 성공하면 그 연결을 presence 없는 경로로 자동 구독한다(이슈 #162, §2.2) — 같은
+	* 방의 다른 구독자는 이 연결의 발화를 받지만 presence.join은 전혀 받지 않는다.
+	*/
+	@Test
+	void bootstrapSubscribesWithoutPresenceOnSuccess() throws Exception {
+		UUID threadId = UUID.randomUUID();
+		UUID userId = UUID.randomUUID();
+		RoomSessionRegistry registry = new RoomSessionRegistry(Duration.ofMillis(50));
+		var provisioning = mock(com.onggijonggi.api.auth.UserIdentityService.class);
+		var directChatTurnService = mock(DirectChatTurnService.class);
+		when(directChatTurnService.prepareOrCreateWithPendingAgentBlocking(eq(threadId), eq(userId), eq("안녕"),
+				any())).thenReturn(new DirectChatTurnService.StoredTurn(UUID.randomUUID(), 0L, UUID.randomUUID(),
+				threadId, 1L));
+		WebSocketSession session = mock(WebSocketSession.class);
+		HandshakeInfo handshakeInfo = mock(HandshakeInfo.class);
+		Principal principal = () -> "bootstrap-user";
+
+		when(handshakeInfo.getPrincipal()).thenReturn(Mono.just(principal));
+		when(session.getHandshakeInfo()).thenReturn(handshakeInfo);
+		when(provisioning.resolveOrProvision("bootstrap-user")).thenReturn(Mono.just(userId));
+		stubTextMessages(session);
+		when(session.receive()).thenReturn(Flux.just(inboundText(WsTestExchange.chatMessageFrame(threadId, "안녕"))));
+		when(session.send(any())).thenAnswer(invocation -> Flux.from(invocation.getArgument(0)).then());
+		when(session.close(any(CloseStatus.class))).thenReturn(Mono.empty());
+
+		UUID observerId = UUID.randomUUID();
+		// 방 상태(presenceEnabled)는 최초 생성자가 정하고 이후 join은 덮어쓰지 않는다
+		// (RoomSessionRegistry.join) — 이 관찰자도 같은 DIRECT 방의 다른 탭이라고 보고
+		// bootstrap과 똑같이 presence 없는 경로로 들어가야 방이 처음부터 올바른 상태로 만들어진다.
+		RoomSessionRegistry.RoomMembership observer = registry.join(threadId, observerId,
+				new PresenceParticipant("observer", "관찰자"), false);
+		CountDownLatch messageBroadcast = new CountDownLatch(1);
+		AtomicInteger presenceJoins = new AtomicInteger();
+		var observerSubscription = observer.frames().subscribe(frame -> {
+			if (frame instanceof ChatMessageFrame chatMessage && "안녕".equals(chatMessage.content())) {
+				messageBroadcast.countDown();
+			}
+			if (frame instanceof PresenceJoinFrame) {
+				presenceJoins.incrementAndGet();
+			}
+		});
+
+		ThreadWebSocketHandler handler = handler(registry, provisioning, MESSAGES_PER_WINDOW, directChatTurnService);
+
+		try {
+			handler.handle(session).block();
+
+			// 자동 구독이 실제로 걸렸다는 것은 방금 붙은 이 연결의 발화가 기존 구독자(observer)에게
+			// broadcastIfCurrent로 도달한다는 것으로 확인한다 — 구독이 안 됐다면 generation이 안 맞아
+			// 방송 자체가 무시된다.
+			assertThat(messageBroadcast.await(1, TimeUnit.SECONDS)).isTrue();
+			assertThat(presenceJoins.get()).isZero();
 		} finally {
 			observerSubscription.dispose();
 			registry.leave(threadId, observerId, new PresenceParticipant("observer", "관찰자"));
