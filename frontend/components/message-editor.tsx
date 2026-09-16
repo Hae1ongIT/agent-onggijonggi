@@ -6,9 +6,8 @@
  잘라내고 수정된 내용으로 교체한 뒤 reload()로 재생성한다.
  *********************************************************/
 
-import { ChatRequestOptions, Message } from 'ai';
+import { Message } from 'ai';
 import { Dispatch, SetStateAction, useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
 
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
@@ -16,12 +15,7 @@ import { Textarea } from './ui/textarea';
 export type MessageEditorProps = {
   message: Message;
   setMode: Dispatch<SetStateAction<'view' | 'edit'>>;
-  setMessages: (
-    messages: Message[] | ((messages: Message[]) => Message[]),
-  ) => void;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
+  onAppendTurn: (content: string) => void;
 };
 
 /** "Send"를 누르면 setMessages로 해당 메시지를 수정본으로 교체하고(그 뒤 메시지는 버려짐)
@@ -29,8 +23,7 @@ export type MessageEditorProps = {
 export function MessageEditor({
   message,
   setMode,
-  setMessages,
-  reload,
+  onAppendTurn,
 }: MessageEditorProps) {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
@@ -83,31 +76,8 @@ export function MessageEditor({
           disabled={isSubmitting}
           onClick={async () => {
             setIsSubmitting(true);
-            const messageId = message.id;
-
-            if (!messageId) {
-              toast.error('Something went wrong, please try again!');
-              setIsSubmitting(false);
-              return;
-            }
-
-            setMessages((messages) => {
-              const index = messages.findIndex((m) => m.id === message.id);
-
-              if (index !== -1) {
-                const updatedMessage = {
-                  ...message,
-                  content: draftContent,
-                };
-
-                return [...messages.slice(0, index), updatedMessage];
-              }
-
-              return messages;
-            });
-
+            onAppendTurn(draftContent);
             setMode('view');
-            reload();
           }}
         >
           {isSubmitting ? 'Sending...' : 'Send'}

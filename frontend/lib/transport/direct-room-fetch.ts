@@ -28,7 +28,14 @@ import {
   type FrameStreamCallbacks,
   frameSourceToResponse,
 } from './frame-stream-fetch';
-import type { ClientFrame, SystemNoticeFrame, WsErrorFrame, WsFrame } from './frames';
+import type {
+  ChatAnswerFrame,
+  ChatMessageFrame,
+  ClientFrame,
+  SystemNoticeFrame,
+  WsErrorFrame,
+  WsFrame,
+} from './frames';
 
 /** push된 값을 pull 기반 AsyncIterable로 내보낸다. WS의 onFrame(콜백/push)과
  * frameSourceToResponse가 기대하는 FrameSource(AsyncIterable<string>, pull)를 잇는 다리다. */
@@ -75,9 +82,14 @@ function createAsyncQueue<T>() {
           if (closed) {
             return failure
               ? Promise.reject(failure)
-              : Promise.resolve({ value: undefined as unknown as T, done: true });
+              : Promise.resolve({
+                  value: undefined as unknown as T,
+                  done: true,
+                });
           }
-          return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+          return new Promise((resolve, reject) =>
+            waiting.push({ resolve, reject }),
+          );
         },
       };
     },
@@ -94,6 +106,7 @@ interface WireMessage {
 interface ChatRequestBody {
   sessionId?: string;
   modelId?: string;
+  clientMsgId?: string;
   messages?: WireMessage[];
 }
 
@@ -125,6 +138,20 @@ export interface CreateDirectChatFetchOptions {
    * 이 함수는 어느 message.id에 매길지 모른다(그건 useChat 내부에서 정해지기 때문이다).
    */
   onAnswerTerminal?: (status: 'done' | 'cancelled' | 'denied') => void;
+
+  /** 모든 HUMAN echo를 방 상태 병합 경로에 전달한다. 현재 요청의 echo만 처리하면 다른 탭이 사라진다. */
+  onChatMessage?: (frame: ChatMessageFrame) => void;
+
+  /** 모든 AGENT 프레임을 방 상태 병합 경로에 전달한다. */
+  onChatAnswer?: (frame: ChatAnswerFrame) => void;
+
+  /** 현재 fetch 턴의 terminal AGENT 프레임은 useChat 임시 assistant ID를 서버 msgId로
+   * 정규화할 수 있도록 별도로 전달한다. */
+  onCurrentAnswerTerminal?: (frame: ChatAnswerFrame) => void;
+
+  onTurnStarted?: (turn: { clientMsgId: string; turnId: string }) => void;
+
+  onOpenChange?: (open: boolean) => void;
   /** 이 방에서 온 system.notice를 턴 매칭 여부와 무관하게 전부 받는다(#29, 이슈 #162) — 배너·
    * 토스트를 그릴지는 화면 몫이다. */
   onSystemNotice?: (frame: SystemNoticeFrame) => void;
@@ -139,15 +166,21 @@ export function createDirectChatFetch(
   let promoted = options?.startPromoted ?? false;
   let isOpen = false;
   let openWaiters: Array<() => void> = [];
-  const activeTurns = new Map<string, AsyncQueue<string>>();
+  const activeTurns = new Map<
+    string,
+    { queue: AsyncQueue<string>; cleanup: () => void }
+  >();
   /** 아직 에코를 못 받은 clientMsgId → 그 발화의 turnId. 에코 도착 시 승격 판단에만 쓰고
    * 곧바로 지운다 — 그 발화의 실제 답변 라우팅은 turnId로 activeTurns가 이미 맡는다. */
   const pendingEchoes = new Map<string, string>();
 
   const handleFrame: RoomListener['onFrame'] = (frame: WsFrame) => {
     if (frame.type === 'chat.message') {
+      options?.onChatMessage?.(frame);
       const turnId =
-        frame.clientMsgId !== null ? pendingEchoes.get(frame.clientMsgId) : undefined;
+        frame.clientMsgId !== null
+          ? pendingEchoes.get(frame.clientMsgId)
+          : undefined;
       if (turnId !== undefined) {
         pendingEchoes.delete(frame.clientMsgId as string);
         if (!promoted) {
@@ -158,8 +191,18 @@ export function createDirectChatFetch(
       return;
     }
     if (frame.type === 'chat.answer') {
-      const queue = frame.turnId !== null ? activeTurns.get(frame.turnId) : undefined;
-      queue?.push(JSON.stringify(frame));
+      options?.onChatAnswer?.(frame);
+      const active =
+        frame.turnId !== null ? activeTurns.get(frame.turnId) : undefined;
+      if (
+        active &&
+        (frame.status === 'done' ||
+          frame.status === 'cancelled' ||
+          frame.status === 'denied')
+      ) {
+        options?.onCurrentAnswerTerminal?.(frame);
+      }
+      active?.queue.push(JSON.stringify(frame));
       return;
     }
     // 워커·비동기 저장 실패는 system.notice(warning)로 온다(§2.2). 종류·턴 매칭과 무관하게
@@ -168,8 +211,8 @@ export function createDirectChatFetch(
     if (frame.type === 'system.notice') {
       options?.onSystemNotice?.(frame);
       if (frame.severity === 'warning' && frame.traceId) {
-        const queue = activeTurns.get(frame.traceId);
-        if (queue) {
+        const active = activeTurns.get(frame.traceId);
+        if (active) {
           const synthetic: WsErrorFrame = {
             type: 'error',
             threadId: frame.threadId,
@@ -177,20 +220,22 @@ export function createDirectChatFetch(
             message: frame.message,
             traceId: frame.traceId,
           };
-          queue.push(JSON.stringify(synthetic));
-          activeTurns.delete(frame.traceId);
+          active.queue.push(JSON.stringify(synthetic));
+          active.cleanup();
         }
       }
       return;
     }
     if (frame.type === 'error' && frame.traceId) {
-      const queue = activeTurns.get(frame.traceId);
-      queue?.push(JSON.stringify(frame));
+      const active = activeTurns.get(frame.traceId);
+      active?.queue.push(JSON.stringify(frame));
+      active?.cleanup();
     }
   };
 
   const onOpenChange = (open: boolean) => {
     isOpen = open;
+    options?.onOpenChange?.(open);
     if (open) {
       const waiters = openWaiters.splice(0);
       for (const resolve of waiters) resolve();
@@ -222,7 +267,8 @@ export function createDirectChatFetch(
     });
   };
 
-  const send = (frame: ClientFrame): boolean => subscription?.send(frame) ?? false;
+  const send = (frame: ClientFrame): boolean =>
+    subscription?.send(frame) ?? false;
 
   const directFetch: typeof fetch = async (_input, init) => {
     ensureSubscription();
@@ -230,11 +276,10 @@ export function createDirectChatFetch(
 
     const body = JSON.parse(String(init?.body ?? '{}')) as ChatRequestBody;
     const content = latestUserContent(body.messages);
-    const clientMsgId = generateUUID();
+    const clientMsgId = body.clientMsgId ?? generateUUID();
     const turnId = generateUUID();
 
     const queue = createAsyncQueue<string>();
-    activeTurns.set(turnId, queue);
     pendingEchoes.set(clientMsgId, turnId);
 
     const cleanup = () => {
@@ -242,6 +287,9 @@ export function createDirectChatFetch(
       pendingEchoes.delete(clientMsgId);
       init?.signal?.removeEventListener('abort', onAbort);
     };
+
+    activeTurns.set(turnId, { queue, cleanup });
+    options?.onTurnStarted?.({ clientMsgId, turnId });
     const onAbort = () => {
       send({ type: 'chat.cancel', threadId, turnId });
     };
@@ -293,4 +341,3 @@ export function createDirectChatFetch(
     },
   };
 }
-

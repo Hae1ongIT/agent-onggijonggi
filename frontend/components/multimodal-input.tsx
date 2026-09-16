@@ -8,18 +8,10 @@
 import type { ChatRequestOptions, CreateMessage, Message } from 'ai';
 import cx from 'classnames';
 import type React from 'react';
-import {
-  type Dispatch,
-  type SetStateAction,
-  memo,
-  useCallback,
-  useEffect,
-  useRef,
-} from 'react';
+import { memo, useCallback, useEffect, useRef } from 'react';
 import { toast } from 'sonner';
 import { useLocalStorage, useWindowSize } from 'usehooks-ts';
 
-import { sanitizeUIMessages } from '@/lib/utils';
 import { ArrowUpIcon, StopIcon } from './icons';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
@@ -49,7 +41,6 @@ function PureMultimodalInput({
   isLoading,
   stop,
   messages,
-  setMessages,
   append,
   handleSubmit,
   className,
@@ -60,7 +51,6 @@ function PureMultimodalInput({
   isLoading: boolean;
   stop: () => void;
   messages: Array<Message>;
-  setMessages: Dispatch<SetStateAction<Array<Message>>>;
   append: (
     message: Message | CreateMessage,
     chatRequestOptions?: ChatRequestOptions,
@@ -134,7 +124,11 @@ function PureMultimodalInput({
         rows={2}
         autoFocus
         onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+          if (
+            event.key === 'Enter' &&
+            !event.shiftKey &&
+            !event.nativeEvent.isComposing
+          ) {
             event.preventDefault();
 
             if (isLoading) {
@@ -148,7 +142,7 @@ function PureMultimodalInput({
 
       <div className="absolute bottom-0 right-0 p-2 w-fit flex flex-row justify-end">
         {isLoading ? (
-          <StopButton stop={stop} setMessages={setMessages} />
+          <StopButton stop={stop} />
         ) : (
           <SendButton input={input} submitForm={submitForm} />
         )}
@@ -173,10 +167,8 @@ export const MultimodalInput = memo(
 
 function PureStopButton({
   stop,
-  setMessages,
 }: {
   stop: () => void;
-  setMessages: Dispatch<SetStateAction<Array<Message>>>;
 }) {
   return (
     <Button
@@ -185,7 +177,6 @@ function PureStopButton({
       onClick={(event) => {
         event.preventDefault();
         stop();
-        setMessages((messages) => sanitizeUIMessages(messages));
       }}
     >
       <StopIcon size={14} />

@@ -41,8 +41,11 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from '@/components/ui/sidebar';
-import { deleteSessionOnServer, renameSessionOnServer } from '@/lib/api/chat';
-import type { ChatSessSummary } from '@/lib/api/server-history';
+import {
+  deleteSessionOnServer,
+  fetchChatSessions,
+  renameSessionOnServer,
+} from '@/lib/api/chat';
 import {
   TITLE_MAX_LENGTH,
   useChatSessionsHydrated,
@@ -55,10 +58,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
  * 목록(serverSessions)으로 메타데이터를 1회 갱신한다. */
 export function AppSidebar({
   authSlot,
-  serverSessions,
 }: {
   authSlot?: React.ReactNode;
-  serverSessions: ChatSessSummary[];
 }) {
   const router = useRouter();
   const { setOpenMobile } = useSidebar();
@@ -85,8 +86,10 @@ export function AppSidebar({
   useEffect(() => {
     if (!hydrated || hasSyncedRef.current) return;
     hasSyncedRef.current = true;
-    useChatSessionsStore.getState().setSessions(serverSessions);
-  }, [hydrated, serverSessions]);
+    fetchChatSessions()
+      .then((sessions) => useChatSessionsStore.getState().setSessions(sessions))
+      .catch(() => undefined);
+  }, [hydrated]);
 
   // 삭제는 되돌릴 수 없어 AlertDialog로 확인한다. pendingDeleteId는 확인창이 띄워진 세션을 가리킨다.
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -195,7 +198,7 @@ export function AppSidebar({
           </div>
         </SidebarHeader>
         <SidebarContent>
-            {/* 협업 채널(이슈 #19)은 세션 목록과 성격이 달라 검색·목록 위에 따로 둔다. */}
+          {/* 협업 채널(이슈 #19)은 세션 목록과 성격이 달라 검색·목록 위에 따로 둔다. */}
           <SidebarGroup>
             <SidebarMenu>
               <SidebarMenuItem>

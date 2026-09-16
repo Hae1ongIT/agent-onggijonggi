@@ -6,7 +6,7 @@
  스트리밍 대기 중 보여주는 ThinkingMessage도 이 파일에서 함께 관리한다.
  *********************************************************/
 
-import type { ChatRequestOptions, Message } from 'ai';
+import type { Message } from 'ai';
 import cx from 'classnames';
 import equal from 'fast-deep-equal';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -32,8 +32,8 @@ const PurePreviewMessage = ({
   terminalStatus,
   failed,
   onResend,
-  setMessages,
-  reload,
+  onAppendTurn,
+  regenerateContent,
 }: {
   chatId: string;
   message: Message;
@@ -45,12 +45,8 @@ const PurePreviewMessage = ({
   terminalStatus?: 'cancelled' | 'denied';
   failed?: boolean;
   onResend?: () => void;
-  setMessages: (
-    messages: Message[] | ((messages: Message[]) => Message[]),
-  ) => void;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
+  onAppendTurn: (content: string) => void;
+  regenerateContent?: string;
 }) => {
   const [mode, setMode] = useState<'view' | 'edit'>('view');
 
@@ -153,8 +149,7 @@ const PurePreviewMessage = ({
                   key={message.id}
                   message={message}
                   setMode={setMode}
-                  setMessages={setMessages}
-                  reload={reload}
+                  onAppendTurn={onAppendTurn}
                 />
               </div>
             )}
@@ -165,7 +160,11 @@ const PurePreviewMessage = ({
               message={message}
               isLoading={isLoading}
               isLastMessage={isLastMessage}
-              reload={reload}
+              onRegenerate={() => {
+                if (regenerateContent !== undefined) {
+                  onAppendTurn(regenerateContent);
+                }
+              }}
             />
           </div>
         </div>

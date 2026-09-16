@@ -17,11 +17,22 @@ import { ChatHeader } from '@/components/chat-header';
 import { LoaderIcon } from '@/components/icons';
 import { NoticeBanner } from '@/components/notice-banner';
 import { buildChatRequestBody, fetchCitations } from '@/lib/api/chat';
-import { STREAM_TRUNCATED_MESSAGE, isStreamTruncated, resolveChatError } from '@/lib/api/errors';
-import type { ChatMsgItem } from '@/lib/api/server-history';
+import {
+  STREAM_TRUNCATED_MESSAGE,
+  isStreamTruncated,
+  resolveChatError,
+} from '@/lib/api/errors';
+import {
+  type ThreadMessageItem,
+  fetchThreadMessages,
+} from '@/lib/api/thread-history';
 import { type SystemNotice, noticeMessage } from '@/lib/collab/room-state';
 import { createDirectChatFetch } from '@/lib/transport/direct-room-fetch';
-import type { SystemNoticeFrame } from '@/lib/transport/frames';
+import type {
+  ChatAnswerFrame,
+  ChatMessageFrame,
+  SystemNoticeFrame,
+} from '@/lib/transport/frames';
 import {
   EMPTY_FAILED_MESSAGE_IDS,
   useChatSessionsHydrated,
@@ -37,13 +48,11 @@ export function Chat({
   id,
   availableModels,
   selectedModelId,
-  serverMessages,
   isNewDraft,
 }: {
   id: string;
   availableModels: string[];
   selectedModelId: string;
-  serverMessages: ChatMsgItem[];
   /** "/"에서 막 만든 방인지(true) URL의 기존 id로 들어온 것인지(false)(이슈 #162, §2.1) —
    * DIRECT WS bootstrap이 구독 없이 첫 발화를 보낼지, 곧바로 room.subscribe로 시작할지를 가른다. */
   isNewDraft: boolean;
@@ -65,7 +74,6 @@ export function Chat({
       id={id}
       availableModels={availableModels}
       selectedModelId={selectedModelId}
-      serverMessages={serverMessages}
       isNewDraft={isNewDraft}
     />
   );
@@ -78,23 +86,42 @@ function ChatSession({
   id,
   availableModels,
   selectedModelId,
-  serverMessages,
   isNewDraft,
 }: {
   id: string;
   availableModels: string[];
   selectedModelId: string;
-  serverMessages: ChatMsgItem[];
   isNewDraft: boolean;
 }) {
   // reload·messages를 onError 클로저에서 바로 참조하면 선언 전 사용(TDZ)이 되므로 ref로 가리킨다.
-  const reloadRef = useRef<(() => void) | null>(null);
+  const appendRef = useRef<
+    ((message: { role: 'user'; content: string }) => unknown) | null
+  >(null);
   const messagesRef = useRef<Message[]>([]);
+
+  const retryLatestTurn = useCallback(() => {
+    const latestUser = [...messagesRef.current]
+      .reverse()
+      .find((message) => message.role === 'user');
+    if (latestUser) {
+      appendRef.current?.({ role: 'user', content: latestUser.content });
+    }
+  }, []);
+
+  const setMessagesBridgeRef = useRef<
+    | ((messages: Message[] | ((messages: Message[]) => Message[])) => void)
+    | null
+  >(null);
+  const activeTurnIdsRef = useRef(new Set<string>());
+  const lastSeqRef = useRef<number | undefined>(undefined);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
+  const [isInaccessible, setIsInaccessible] = useState(false);
 
   // 이번 턴이 done·cancelled·denied 중 무엇으로 끝났는지(이슈 #162, §3.2). useChat의 text
   // 스트림 body는 "끝났다"만 전해서, onAnswerTerminal(턴 종료 시점)과 onFinish(그 턴의
   // resultMessage.id 확정 시점)를 이 ref로 이어 붙여야 어느 메시지의 상태인지 알 수 있다.
   const lastTerminalStatusRef = useRef<'done' | 'cancelled' | 'denied'>('done');
+  const lastTerminalServerMsgIdRef = useRef<string | null>(null);
   const [terminalStatusByMessageId, setTerminalStatusByMessageId] = useState<
     Record<string, 'cancelled' | 'denied'>
   >({});
@@ -124,6 +151,82 @@ function ChatSession({
     });
   }, []);
 
+  const mergeChatMessage = useCallback((frame: ChatMessageFrame) => {
+    setMessagesBridgeRef.current?.((previous) => {
+      const optimisticIndex =
+        frame.clientMsgId === null
+          ? -1
+          : previous.findIndex((message) => message.id === frame.clientMsgId);
+      const serverIndex = previous.findIndex(
+        (message) => message.id === frame.msgId,
+      );
+      const index = optimisticIndex >= 0 ? optimisticIndex : serverIndex;
+      const nextMessage: Message = {
+        id: frame.msgId,
+        role: 'user',
+        content: frame.content,
+      };
+      if (index < 0) return [...previous, nextMessage];
+      const next = [...previous];
+      next[index] = { ...next[index], ...nextMessage };
+      return next;
+    });
+  }, []);
+
+  const mergeOtherTurnAnswer = useCallback((frame: ChatAnswerFrame) => {
+    const isCurrentTurn =
+      frame.turnId !== null && activeTurnIdsRef.current.has(frame.turnId);
+    if (isCurrentTurn) {
+      if (frame.status !== 'streaming')
+        activeTurnIdsRef.current.delete(frame.turnId as string);
+      return;
+    }
+    setMessagesBridgeRef.current?.((previous) => {
+      const index = previous.findIndex((message) => message.id === frame.msgId);
+      if (index < 0) {
+        if (
+          frame.delta === '' &&
+          frame.status !== 'cancelled' &&
+          frame.status !== 'denied'
+        )
+          return previous;
+        return [
+          ...previous,
+          { id: frame.msgId, role: 'assistant', content: frame.delta },
+        ];
+      }
+      const next = [...previous];
+      next[index] = {
+        ...next[index],
+        content: `${next[index].content}${frame.delta}`,
+      };
+      return next;
+    });
+  }, []);
+
+  const mergeHistory = useCallback((items: ThreadMessageItem[]) => {
+    if (items.length === 0) return;
+    lastSeqRef.current = Math.max(
+      lastSeqRef.current ?? -1,
+      ...items.map((item) => item.seq),
+    );
+    setMessagesBridgeRef.current?.((previous) => {
+      const next = [...previous];
+      for (const item of items) {
+        if (item.athKind === 'SYSTEM') continue;
+        const message: Message = {
+          id: item.id,
+          role: item.athKind === 'HUMAN' ? 'user' : 'assistant',
+          content: item.content,
+        };
+        const index = next.findIndex((candidate) => candidate.id === item.id);
+        if (index < 0) next.push(message);
+        else next[index] = { ...next[index], ...message };
+      }
+      return next;
+    });
+  }, []);
+
   // WS 커넥션은 탭이 공유하는 허브(ws-rooms.ts)가 들고 있어 인증도 그쪽 핸드셰이크 몫이다 —
   // 옛 HTTP 경로의 authFetch 재로그인 신호는 이제 필요 없다(이슈 #162). 새 draft면 구독 없이
   // 첫 발화만 보내고(bootstrap), 기존 방이면 처음부터 room.subscribe로 시작한다(§2.1).
@@ -134,13 +237,52 @@ function ChatSession({
         onAnswerTerminal: (status) => {
           lastTerminalStatusRef.current = status;
         },
+        onCurrentAnswerTerminal: (frame) => {
+          lastTerminalServerMsgIdRef.current = frame.msgId;
+        },
         onSystemNotice: handleSystemNotice,
+        onChatMessage: mergeChatMessage,
+        onChatAnswer: mergeOtherTurnAnswer,
+        onTurnStarted: ({ turnId }) => activeTurnIdsRef.current.add(turnId),
+        onOpenChange: (open) => {
+          if (open) setConnectionEpoch((epoch) => epoch + 1);
+        },
       }),
     // handleSystemNotice는 useCallback([])으로 고정돼 있어 정체성이 안 바뀐다 — 방 재구독을
     // 일으키지 않기 위해 의도적으로 deps에 넣지 않는다.
-    [id, isNewDraft],
+    [
+      id,
+      isNewDraft,
+      handleSystemNotice,
+      mergeChatMessage,
+      mergeOtherTurnAnswer,
+    ],
   );
   useEffect(() => () => directChat.dispose(), [directChat]);
+
+  useEffect(() => {
+    if (isNewDraft) return;
+    let cancelled = false;
+    fetchThreadMessages(id, lastSeqRef.current)
+      .then(({ status, messages }) => {
+        if (cancelled) return;
+        if (status === 404) {
+          setIsInaccessible(true);
+          return;
+        }
+        if (status >= 400) {
+          setIsInaccessible(true);
+          return;
+        }
+        mergeHistory(messages);
+      })
+      .catch(() => {
+        if (!cancelled) setIsInaccessible(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionEpoch, id, isNewDraft, mergeHistory]);
 
   // useChat은 initialMessages를 최초 마운트 시점에만 반영하므로 지연 초기화로 한 번만 읽는다.
   // 로컬에 메시지가 없으면(다른 기기·새 브라우저 등) serverMessages로 폴백한다.
@@ -149,12 +291,7 @@ function ChatSession({
       .getState()
       .sessions.find((session) => session.id === id)?.messages;
     if (local && local.length > 0) return local;
-    if (serverMessages.length === 0) return local;
-    return serverMessages.map((item) => ({
-      id: item.id,
-      role: item.role as Message['role'],
-      content: item.content,
-    }));
+    return local;
   });
 
   // 전송에 쓰이는 모델의 정본. prop으로 받은 selectedModelId는 쿠키에서 온 서버 렌더 값이라
@@ -195,12 +332,14 @@ function ChatSession({
   // triggerRequest → handleSubmit이 매 렌더 새로 만들어져, 입력창의 memo 비교자가 무력화되고
   // 스트리밍 중 100ms(experimental_throttle)마다 입력창이 다시 그려진다.
   const prepareRequestBody = useCallback(
-    ({ messages }: { messages: Message[] }) =>
-      buildChatRequestBody({
+    ({ messages }: { messages: Message[] }) => ({
+      ...buildChatRequestBody({
         sessionId: id,
         modelId: modelIdRef.current,
         messages,
       }),
+      clientMsgId: messages.at(-1)?.id,
+    }),
     [id],
   );
 
@@ -213,7 +352,7 @@ function ChatSession({
       if (isStreamTruncated(messagesRef.current.at(-1))) {
         toast.error(STREAM_TRUNCATED_MESSAGE, {
           duration: Number.POSITIVE_INFINITY,
-          action: { label: '다시 시도', onClick: () => reloadRef.current?.() },
+          action: { label: '다시 시도', onClick: retryLatestTurn },
           cancel: { label: '닫기', onClick: () => {} },
         });
         return;
@@ -225,34 +364,50 @@ function ChatSession({
       }
       toast.error(message, {
         duration: Number.POSITIVE_INFINITY,
-        action: { label: '다시 시도', onClick: () => reloadRef.current?.() },
+        action: { label: '다시 시도', onClick: retryLatestTurn },
         cancel: { label: '닫기', onClick: () => {} },
       });
     },
-    [id],
+    [retryLatestTurn],
   );
 
   // setMessages도 reloadRef와 같은 이유로 ref에 담는다 — handleChatFinish가 useChat 호출보다
   // 앞에 있어 아직 값이 없는 시점에 정의된다.
   const setMessagesRef = useRef<
-    ((messages: Message[] | ((messages: Message[]) => Message[])) => void) | null
+    | ((messages: Message[] | ((messages: Message[]) => Message[])) => void)
+    | null
   >(null);
 
   // DIRECT 전용 terminal 상태(cancelled·denied)만 message.id별로 기억한다 — done은 평범한
   // 완료라 화면이 따로 표시할 게 없다(이슈 #162, §3.2).
   const handleChatFinish = useCallback((message: Message) => {
     const status = lastTerminalStatusRef.current;
+    const serverMessageId = lastTerminalServerMsgIdRef.current;
     lastTerminalStatusRef.current = 'done';
+    lastTerminalServerMsgIdRef.current = null;
+    const visibleMessageId = serverMessageId ?? message.id;
+    if (serverMessageId && serverMessageId !== message.id) {
+      setMessagesRef.current?.((previous) =>
+        previous.map((existing) =>
+          existing.id === message.id
+            ? { ...existing, id: serverMessageId }
+            : existing,
+        ),
+      );
+    }
     if (status === 'done') return;
-    setTerminalStatusByMessageId((prev) => ({ ...prev, [message.id]: status }));
+    setTerminalStatusByMessageId((prev) => ({
+      ...prev,
+      [visibleMessageId]: status,
+    }));
     // useChat은 텍스트 조각을 하나라도 받아야 messages에 반영한다(onUpdate가 onTextPart
     // 안에서만 불린다) — DENIED는 항상, CANCELLED도 즉시 취소되면 본문이 비어 조각이 하나도
     // 안 와서 이 메시지 자체가 messages에 없을 수 있다. 그 경우만 직접 끼워 넣는다.
     if (message.content === '') {
       setMessagesRef.current?.((prev) =>
-        prev.some((existing) => existing.id === message.id)
+        prev.some((existing) => existing.id === visibleMessageId)
           ? prev
-          : [...prev, message],
+          : [...prev, { ...message, id: visibleMessageId }],
       );
     }
   }, []);
@@ -266,7 +421,6 @@ function ChatSession({
     append,
     isLoading,
     stop,
-    reload,
   } = useChat({
     id,
     initialMessages,
@@ -282,9 +436,10 @@ function ChatSession({
     onFinish: handleChatFinish,
   });
 
-  reloadRef.current = reload;
+  appendRef.current = append;
   messagesRef.current = messages;
   setMessagesRef.current = setMessages;
+  setMessagesBridgeRef.current = setMessages;
 
   useEffect(() => {
     useChatSessionsStore.getState().setSessionMessages(id, messages);
@@ -302,9 +457,21 @@ function ChatSession({
   const handleResendFailedMessage = useCallback(
     (messageId: string) => {
       useChatSessionsStore.getState().clearMessageFailed(id, messageId);
-      reload();
+      const failed = messagesRef.current.find(
+        (message) => message.id === messageId,
+      );
+      if (failed?.role === 'user') {
+        append({ role: 'user', content: failed.content });
+      }
     },
-    [id, reload],
+    [append, id],
+  );
+
+  const appendNewTurn = useCallback(
+    (content: string) => {
+      append({ role: 'user', content });
+    },
+    [append],
   );
 
   // 새 user 메시지가 오면 채팅 스트림과 별도로 근거 인용을 조회한다. ref로 이미 요청한
@@ -386,9 +553,14 @@ function ChatSession({
         terminalStatusByMessageId={terminalStatusByMessageId}
         failedMessageIds={failedMessageIds}
         onResendFailedMessage={handleResendFailedMessage}
-        setMessages={setMessages}
-        reload={reload}
+        onAppendTurn={appendNewTurn}
       />
+
+      {isInaccessible && (
+        <div className="mx-auto w-full max-w-3xl px-4 pb-3 text-sm text-destructive">
+          이 대화에 접근할 수 없거나 존재하지 않습니다.
+        </div>
+      )}
 
       <form className="flex mx-auto px-4 bg-background pb-4 md:pb-6 gap-2 w-full md:max-w-3xl">
         <MultimodalInput
@@ -396,10 +568,9 @@ function ChatSession({
           input={input}
           setInput={setInput}
           handleSubmit={handleChatSubmit}
-          isLoading={isLoading}
+          isLoading={isLoading || isInaccessible}
           stop={stop}
           messages={messages}
-          setMessages={setMessages}
           append={append}
         />
       </form>

@@ -292,15 +292,19 @@ const server = Bun.serve<SocketData>({
         const others = registry.membersOf(threadId);
         rooms.set(threadId, registry.join(threadId, member));
         // 스냅샷은 이 구독에게만, 본인을 포함해서 보낸다(#26). 클라이언트는 이것을 구독 완료로 읽는다.
-        member.send(
-          JSON.stringify({
-            type: 'presence.snapshot',
-            threadId: threadId,
-            participants: distinctParticipants(registry.membersOf(threadId)),
-          }),
-        );
+        if (!directRooms.has(threadId))
+          member.send(
+            JSON.stringify({
+              type: 'presence.snapshot',
+              threadId: threadId,
+              participants: distinctParticipants(registry.membersOf(threadId)),
+            }),
+          );
         // 그 사용자의 첫 연결일 때만 입장이다 — 탭을 더 여는 것은 입장이 아니다.
-        if (!others.some((other) => other.subject === subject)) {
+        if (
+          !directRooms.has(threadId) &&
+          !others.some((other) => other.subject === subject)
+        ) {
           sendPresence(others, 'presence.join', threadId, subject, displayName);
         }
         console.log(`[mock-ws] join ${subject} → ${threadId}`);
@@ -321,6 +325,7 @@ const server = Bun.serve<SocketData>({
           generation,
           parsed.turnId,
           connectionId,
+          directRooms.has(parsed.threadId),
         );
         if (result.kind === 'pending') {
           broadcast(result.job, queuedFrame(result.job, 'cancelled'));
@@ -370,7 +375,9 @@ const server = Bun.serve<SocketData>({
       scheduleMockNotice(threadId, generation, content);
 
       // DIRECT는 멘션 여부와 무관하게 모든 발화에 답한다(이슈 #162) — COLLAB은 @AI 멘션만.
-      const prompt = directRooms.has(threadId) ? content.trim() : aiPrompt(content);
+      const prompt = directRooms.has(threadId)
+        ? content.trim()
+        : aiPrompt(content);
       if (prompt === null) return;
       const traceId = `mock-turn-${++turnSequence}`;
       if (prompt === '') {

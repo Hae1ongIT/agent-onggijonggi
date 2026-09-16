@@ -82,8 +82,8 @@ function chatMessageEcho(clientMsgId: string, turnId: string) {
 beforeEach(() => {
   listenRoom.mockReset();
   subscribeRoom.mockReset();
-  listenRoom.mockImplementation(
-    (_threadId: string, listener: RoomListener) => fakeSubscription(listener),
+  listenRoom.mockImplementation((_threadId: string, listener: RoomListener) =>
+    fakeSubscription(listener),
   );
   subscribeRoom.mockImplementation(
     (_threadId: string, listener: RoomListener) => fakeSubscription(listener),
@@ -103,7 +103,12 @@ async function sentChatMessage(
   await flush();
   const frames = sub.sent.filter((f) => f.type === 'chat.message');
   const frame = frames[nth];
-  if (!frame || frame.type !== 'chat.message' || !frame.clientMsgId || !frame.turnId) {
+  if (
+    !frame ||
+    frame.type !== 'chat.message' ||
+    !frame.clientMsgId ||
+    !frame.turnId
+  ) {
     throw new Error('chat.message가 전송되지 않았다');
   }
   return { clientMsgId: frame.clientMsgId, turnId: frame.turnId };
@@ -129,7 +134,9 @@ describe('createDirectChatFetch — bootstrap과 승격', () => {
     sub.onFrame(JSON.parse(chatMessageEcho(clientMsgId, turnId)));
     expect(sub.promote).toHaveBeenCalledOnce();
 
-    sub.onFrame(JSON.parse(chatAnswer(turnId, { delta: '반가워요', status: 'done' })));
+    sub.onFrame(
+      JSON.parse(chatAnswer(turnId, { delta: '반가워요', status: 'done' })),
+    );
     const response = await responsePromise;
     await expect(response.text()).resolves.toBe('반가워요');
   });
@@ -141,7 +148,9 @@ describe('createDirectChatFetch — bootstrap과 승격', () => {
     });
     const sub: FakeSubscription = listenRoom.mock.results[0].value;
     const firstIds = await sentChatMessage(sub);
-    sub.onFrame(JSON.parse(chatMessageEcho(firstIds.clientMsgId, firstIds.turnId)));
+    sub.onFrame(
+      JSON.parse(chatMessageEcho(firstIds.clientMsgId, firstIds.turnId)),
+    );
     sub.onFrame(JSON.parse(chatAnswer(firstIds.turnId, { status: 'done' })));
     await first;
 
@@ -233,7 +242,9 @@ describe('createDirectChatFetch — DIRECT 전용 terminal 상태', () => {
     const sub: FakeSubscription = subscribeRoom.mock.results[0].value;
     const { turnId } = await sentChatMessage(sub);
 
-    sub.onFrame(JSON.parse(chatAnswer(turnId, { delta: '안', status: 'streaming' })));
+    sub.onFrame(
+      JSON.parse(chatAnswer(turnId, { delta: '안', status: 'streaming' })),
+    );
     const response = await responsePromise;
     const reader = response.body?.getReader();
     if (!reader) throw new Error('no body');
@@ -274,16 +285,20 @@ describe('createDirectChatFetch — DIRECT 전용 terminal 상태', () => {
         }),
       ),
     );
-    sub.onFrame(JSON.parse(chatAnswer(turnId, { delta: '괜찮음', status: 'done' })));
+    sub.onFrame(
+      JSON.parse(chatAnswer(turnId, { delta: '괜찮음', status: 'done' })),
+    );
     const response = await responsePromise;
     await expect(response.text()).resolves.toBe('괜찮음');
   });
 
   it('onAnswerTerminal은 매 턴이 done·cancelled·denied 무엇으로 끝났는지 알린다', async () => {
     const onAnswerTerminal = vi.fn();
+    const onCurrentAnswerTerminal = vi.fn();
     const direct = createDirectChatFetch(THREAD_ID, {
       startPromoted: true,
       onAnswerTerminal,
+      onCurrentAnswerTerminal,
     });
     const responsePromise = direct.fetch('ignored', {
       body: JSON.stringify({ messages: [{ role: 'user', content: '안녕' }] }),
@@ -295,6 +310,9 @@ describe('createDirectChatFetch — DIRECT 전용 terminal 상태', () => {
     await responsePromise;
 
     expect(onAnswerTerminal).toHaveBeenCalledExactlyOnceWith('denied');
+    expect(onCurrentAnswerTerminal).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ status: 'denied' }),
+    );
   });
 
   it('onSystemNotice는 턴 매칭 여부와 무관하게 방의 모든 notice를 전달한다', async () => {

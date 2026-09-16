@@ -3,7 +3,7 @@
  설 명 : 메시지 목록 스크롤 영역. 대화가 없으면 Overview를, 있으면 메시지들을, 응답 대기 중이면 ThinkingMessage를 렌더링한다.
  *********************************************************/
 
-import { ChatRequestOptions, Message } from 'ai';
+import { Message } from 'ai';
 import equal from 'fast-deep-equal';
 import { memo, useEffect, useRef, useState } from 'react';
 
@@ -21,12 +21,7 @@ interface MessagesProps {
   terminalStatusByMessageId: Record<string, 'cancelled' | 'denied'>;
   failedMessageIds: string[];
   onResendFailedMessage: (messageId: string) => void;
-  setMessages: (
-    messages: Message[] | ((messages: Message[]) => Message[]),
-  ) => void;
-  reload: (
-    chatRequestOptions?: ChatRequestOptions,
-  ) => Promise<string | null | undefined>;
+  onAppendTurn: (content: string) => void;
 }
 
 /** 마지막 메시지가 user이고 아직 로딩 중이면 ThinkingMessage로 대기 상태를 보여준다. */
@@ -38,8 +33,7 @@ function PureMessages({
   terminalStatusByMessageId,
   failedMessageIds,
   onResendFailedMessage,
-  setMessages,
-  reload,
+  onAppendTurn,
 }: MessagesProps) {
   const [messagesContainerRef, messagesEndRef] =
     useScrollToBottom<HTMLDivElement>();
@@ -88,8 +82,15 @@ function PureMessages({
             failedMessageIds.includes(message.id)
           }
           onResend={() => onResendFailedMessage(message.id)}
-          setMessages={setMessages}
-          reload={reload}
+          onAppendTurn={onAppendTurn}
+          regenerateContent={
+            message.role === 'assistant'
+              ? messages
+                  .slice(0, index)
+                  .reverse()
+                  .find((candidate) => candidate.role === 'user')?.content
+              : undefined
+          }
         />
       ))}
 
