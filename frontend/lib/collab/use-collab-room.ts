@@ -20,6 +20,7 @@ import type { ClientFrame } from '@/lib/transport/frames';
 import { generateUUID } from '@/lib/utils';
 import {
   type RoomState,
+  advanceCursor,
   applyFrame,
   applyHistory,
   clearRoomError,
@@ -83,34 +84,82 @@ export function useCollabRoom(threadId: string): CollabRoom {
   const [participantsRevision, setParticipantsRevision] = useState(0);
 
   /**
-   * 과거 대화는 진입할 때 REST로 한 번만 불러온다(이슈 #190). 이후의 실시간은 아래 WS가 맡는다.
-   *
-   * WS 연결을 기다리지 않고 나란히 시작한다 — 둘이 겹쳐 도착해도 applyHistory가 msgId로 걸러
-   * 한 번만 남기므로 한쪽을 늦출 이유가 없다. 이력을 못 얻는 것은 방을 못 열 이유가 아니라,
-   * 실패해도 빈 흐름으로 계속 간다.
+   * 이력 로딩(REST)과 WS 연결을 한 이펙트에 묶는다. 원래는 둘로 나뉘어 있었지만(#190),
+   * 최초 연결 따라잡기(#208)가 "이력이 끝났는가"와 "WS가 한 번이라도 열렸는가"를 서로
+   * 넘겨다봐야 해서 조율 상태가 필요해졌다 — 그 상태(`historyLoaded`·`wsOpenedOnce`·
+   * `initialCatchUpFired`·`alive`)를 훅 최상단의 ref로 공유하면 StrictMode 이중 마운트나
+   * 빠른 재마운트에서 이전 인스턴스의 값이 새 인스턴스로 새는 문제가 생긴다(ref는 인스턴스가
+   * 갈려도 안 갈린다). 이 값들은 "이번 마운트에서만" 의미가 있으므로 이펙트 클로저의 지역
+   * 변수로 두는 편이 맞다 — 재연결(`reconnected`)이 원래 그렇게 돼 있던 이유와 같다.
+   * 그래서 두 이펙트를 하나로 합쳐 전부 지역 변수로 둔다.
    */
   useEffect(() => {
     let alive = true;
+    let historyLoaded = false;
+    let wsOpenedOnce = false;
+    let initialCatchUpFired = false;
+    // 재연결의 따라잡기는 최초 연결 따라잡기와 별개다 — 여기서 세는 것은 "그 뒤에 다시
+    // 붙었는가"뿐이다(이슈 #190).
+    let reconnected = false;
+
+    /**
+     * 최초 연결 따라잡기(#208). 이력 로딩과 WS open 둘 다 끝난 바로 그 순간 커서 있는
+     * 따라잡기를 딱 한 번 쏜다 — 어느 쪽이 먼저 끝나든 상관없다.
+     *
+     * 재연결과 합치지 않는 이유: 이력이 아직 안 끝난 채 WS가 열리면 커서가 아직 null이다.
+     * 재연결과 똑같이 그 자리에서 바로 쏘면 커서 없는 전체 재조회가 되고, 방이 클수록(=이력
+     * REST가 느릴수록 WS가 먼저 열릴 확률도 같이 오른다) 그 비용이 커진다. 그래서 이력이
+     * 아직이면 여기서 안 쏘고, 이력이 끝나 커서가 확정되는 순간 다시 불려 그때 쏜다.
+     */
+    function maybeFireInitialCatchUp() {
+      if (initialCatchUpFired) return;
+      if (!historyLoaded || !wsOpenedOnce) return;
+      initialCatchUpFired = true;
+      console.info(
+        `[#208][collab] 최초 연결 따라잡기 발동 threadId=${threadId} cursor=${lastSeqRef.current ?? 'none'}`,
+      );
+      catchUp();
+    }
+
+    /**
+     * 과거 대화는 진입할 때 REST로 한 번만 불러온다(이슈 #190). 이후의 실시간은 아래 WS가
+     * 맡는다.
+     *
+     * WS 연결을 기다리지 않고 나란히 시작한다 — 둘이 겹쳐 도착해도 applyHistory가 msgId로
+     * 걸러 한 번만 남기므로 한쪽을 늦출 이유가 없다. 이력을 못 얻는 것은 방을 못 열 이유가
+     * 아니라, 실패해도 빈 흐름으로 계속 간다.
+     */
     fetchCollabMessages(threadId)
       .then((items) => {
-        if (alive) setState((current) => applyHistory(current, items));
+        // lastSeqRef는 보통 아래 lastSeq 동기화 이펙트가 다음 렌더에서 채운다(#208 이전부터
+        // 있던 별도 이펙트). 하지만 maybeFireInitialCatchUp은 바로 이어지는 .finally()에서
+        // 같은 틱에 불릴 수 있어 그 렌더를 기다리지 못한다 — applyHistory와 같은 규칙
+        // (advanceCursor)으로 여기서 미리 계산해 둔다. state.lastSeq가 실제로 반영하는
+        // 값과는 다음 렌더에서 맞춰진다.
+        //
+        // alive로 반드시 감싼다 — lastSeqRef는 훅 전체가 공유하는 ref라서, 이미 정리된(예:
+        // StrictMode 이중 마운트의 첫 번째) 인스턴스가 뒤늦게 이 줄을 실행하면 살아있는
+        // 인스턴스가 나중에 읽을 커서를 영구히 오염시킨다(advanceCursor는 값을 절대 되돌리지
+        // 않으므로 한 번 부풀려지면 이후 진짜 값이 와도 안 줄어든다) — setState 못지않게
+        // 위험하다.
+        if (alive) {
+          lastSeqRef.current = items.reduce(
+            (cursor, item) => advanceCursor(cursor, item.seq),
+            lastSeqRef.current,
+          );
+          setState((current) => applyHistory(current, items));
+        }
       })
       .catch((error) => {
         console.error('[collab] 이력을 불러오지 못했습니다', error);
+      })
+      .finally(() => {
+        // 성공이든 실패든 "이력 단계는 끝났다"로 친다(#208) — 실패했는데 여기서 안 켜면
+        // 이력이 계속 실패하는 방에서는 최초 따라잡기가 영영 안 켜진다. 커서가 없으니
+        // 사실상 전체 재조회 재시도가 되고, 그게 여기서는 안전망이다.
+        historyLoaded = true;
+        maybeFireInitialCatchUp();
       });
-    return () => {
-      alive = false;
-    };
-  }, [threadId]);
-
-  useEffect(() => {
-    lastSeqRef.current = state.lastSeq;
-  }, [state.lastSeq]);
-
-  useEffect(() => {
-    // 첫 연결은 위의 진입 이력이 이미 맡았다. 여기서 세는 것은 "그 뒤에 다시 붙었는가"다.
-    let reconnected = false;
-    let alive = true;
 
     /**
      * 끊겼다 다시 붙으면 그 동안 오간 메시지를 따라잡는다(이슈 #190). 방송은 그 순간 붙어
@@ -160,6 +209,13 @@ export function useCollabRoom(threadId: string): CollabRoom {
           reconnected = true;
           return;
         }
+        // 최초 연결 따라잡기(#208) — 이 open이 이 마운트에서 처음이면 wsOpenedOnce를 세우고
+        // maybeFireInitialCatchUp에 판단을 맡긴다. reconnected는 아직 false라 바로 아래
+        // 재연결 분기는 여기서 안 탄다 — 같은 open에서 두 따라잡기가 겹쳐 쏘지 않는다.
+        if (!wsOpenedOnce) {
+          wsOpenedOnce = true;
+          maybeFireInitialCatchUp();
+        }
         if (!reconnected) return;
         reconnected = false;
         catchUp();
@@ -173,6 +229,10 @@ export function useCollabRoom(threadId: string): CollabRoom {
       subscriptionRef.current = null;
     };
   }, [threadId]);
+
+  useEffect(() => {
+    lastSeqRef.current = state.lastSeq;
+  }, [state.lastSeq]);
 
   // 거부를 통보받았으면 이 방 구독을 푼다 — 커넥션은 다른 방과 함께 쓰므로 닫지 않는다(이슈 #161).
   // 구독을 남겨 두면 재연결할 때마다 권한 없는 방을 다시 두드린다.
