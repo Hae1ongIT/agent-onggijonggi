@@ -37,8 +37,8 @@ export type FrameSource = AsyncIterable<string>;
  * 채팅방(#13)이 붙을 때 쓰일 자리를 미리 비워둔 것이다. onChatCitation은 기존 REST
  * CitationsResponse와 같은 모양(citations + restrictedResultsOmitted)을 그대로 재사용한다 —
  * #163에서 chat.tsx의 citationsByMessageId 상태로 옮길 때 변환 없이 바로 쓸 수 있게 하기 위해서다.
- * citations가 비어 있어도 restrictedResultsOmitted가 true면(전부 걸러진 경우) 불린다 —
- * "이 패킷에 citation 관련 정보가 있다"는 기준은 둘 중 하나라도 참인지로 판단한다. */
+ * citations가 비어 있어도 restrictedResultsOmitted가 true면(전부 걸러진 경우) 불린다. RAG가
+ * 없는 동안 DIRECT가 보내는 빈 citation 전용 streaming 프레임도 loading 종료 신호로 전달한다. */
 export interface FrameStreamCallbacks {
   /** turnId는 이 citations가 어느 턴 것인지 호출부가 메시지에 정확히 짝지을 수 있게 실어
    * 보낸다(이슈 #163 후속) — "지금 활성 턴"만 아는 단일 ref로 짝짓던 방식은 턴을 취소하고
@@ -130,7 +130,11 @@ export async function frameSourceToResponse(
           routeFrame(frame, {
             onChatAnswer: (f) => {
               if (f.delta) controller.enqueue(encoder.encode(f.delta));
-              if (f.citations.length > 0 || f.restrictedResultsOmitted) {
+              if (
+                f.citations.length > 0 ||
+                f.restrictedResultsOmitted ||
+                (f.delta === '' && f.status === 'streaming')
+              ) {
                 callbacks.onChatCitation?.({
                   citations: f.citations,
                   restrictedResultsOmitted: f.restrictedResultsOmitted,
@@ -138,7 +142,11 @@ export async function frameSourceToResponse(
                 });
               }
               // cancelled·denied는 DIRECT 전용 terminal 상태다(이슈 #162) — done과 같이 스트림을 닫는다.
-              if (f.status === 'done' || f.status === 'cancelled' || f.status === 'denied') {
+              if (
+                f.status === 'done' ||
+                f.status === 'cancelled' ||
+                f.status === 'denied'
+              ) {
                 callbacks.onChatAnswerTerminal?.(f.status);
                 controller.close();
               }
