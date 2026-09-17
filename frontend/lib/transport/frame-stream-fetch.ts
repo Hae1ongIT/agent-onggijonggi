@@ -40,6 +40,9 @@ export type FrameSource = AsyncIterable<string>;
  * citations가 비어 있어도 restrictedResultsOmitted가 true면(전부 걸러진 경우) 불린다. RAG가
  * 없는 동안 DIRECT가 보내는 빈 citation 전용 streaming 프레임도 loading 종료 신호로 전달한다. */
 export interface FrameStreamCallbacks {
+  /** DIRECT 현재 턴의 첫 빈 streaming 답변을 citation 결과로 해석할지 명시한다. 일반
+   * status-only/heartbeat 프레임은 citation loading을 끝내면 안 되므로 기본값은 false다. */
+  allowInitialEmptyCitationResult?: boolean;
   /** turnId는 이 citations가 어느 턴 것인지 호출부가 메시지에 정확히 짝지을 수 있게 실어
    * 보낸다(이슈 #163 후속) — "지금 활성 턴"만 아는 단일 ref로 짝짓던 방식은 턴을 취소하고
    * 바로 재전송하면 늦게 도착한 citations가 엉뚱한 메시지에 붙을 수 있었다. */
@@ -109,6 +112,7 @@ export async function frameSourceToResponse(
 
   const encoder = new TextEncoder();
   let pending: IteratorResult<string> | null = first;
+  let hasReceivedChatAnswer = false;
 
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -129,11 +133,17 @@ export async function frameSourceToResponse(
 
           routeFrame(frame, {
             onChatAnswer: (f) => {
+              const isInitialEmptyCitationResult =
+                callbacks.allowInitialEmptyCitationResult &&
+                !hasReceivedChatAnswer &&
+                f.delta === '' &&
+                f.status === 'streaming';
+              hasReceivedChatAnswer = true;
               if (f.delta) controller.enqueue(encoder.encode(f.delta));
               if (
                 f.citations.length > 0 ||
                 f.restrictedResultsOmitted ||
-                (f.delta === '' && f.status === 'streaming')
+                isInitialEmptyCitationResult
               ) {
                 callbacks.onChatCitation?.({
                   citations: f.citations,
