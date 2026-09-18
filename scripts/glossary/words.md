@@ -32,6 +32,7 @@
 | `audit` | 감사 |
 | `by` | 주체 |
 | `chat` | 대화 |
+| `checked` | 확인됨 |
 | `chunk` | 조각 |
 | `chunking` | 조각화 |
 | `content` | 본문 |
@@ -49,6 +50,7 @@
 | `ended` | 종료됨 |
 | `error` | 오류 |
 | `file` | 파일 |
+| `first` | 첫 |
 | `idempotency` | 멱등성 |
 | `inactive` | 비활성 |
 | `indexed` | 색인됨 |

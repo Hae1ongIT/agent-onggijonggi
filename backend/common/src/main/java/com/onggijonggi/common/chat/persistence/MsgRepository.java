@@ -4,6 +4,7 @@ import com.onggijonggi.common.chat.domain.AthKind;
 import com.onggijonggi.common.chat.domain.Msg;
 import com.onggijonggi.common.chat.domain.MsgStatus;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -34,5 +35,12 @@ public interface MsgRepository extends JpaRepository<Msg, UUID> {
 
 	/** 위험 발화 사후 검증 배치가 커서 이후의 사람 발화만 스캔한다(#28) — AGENT·SYSTEM은 대상이 아니다. */
 	List<Msg> findByThrIdAndAthKindAndSeqGreaterThanOrderBySeqAsc(UUID thrId, AthKind athKind, long seq);
+
+	/**
+	* 위험 발화 사후 검증 배치가 기존에 커서 없음 기본값 결함으로 건너뛴 방의 seq=0 발화를
+	* 소급 검사한다(이슈 #234). 사람 메시지 저장이 fire-and-forget이라 채번·방송은 됐어도
+	* 이 행이 없을 수 있다 — 그 경우 빈 Optional을 그대로 돌려준다.
+	*/
+	Optional<Msg> findByThrIdAndAthKindAndSeq(UUID thrId, AthKind athKind, long seq);
 
 }
