@@ -19,6 +19,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `by` | `by` | 주체 | 알고리즘 | - |
 | `cnc` | `cancelled` | 취소됨 | 알고리즘 | - |
 | `chat` | `chat` | 대화 | 알고리즘 | - |
+| `chc` | `checked` | 확인됨 | 알고리즘 | - |
 | `chunk` | `chunk` | 조각 | 예외 | 알고리즘 `chn`은 의미가 불명확 |
 | `chnk` | `chunking` | 조각화 | 예외 | `chunk`와 구분(알고리즘은 둘 다 `chn`) |
 | `completed` | `completed` | 완료됨 | 예외 | 알고리즘 결과 `cmp`는 compare·component와 혼동. `completed_at` 대칭, 기존 `created`/`updated`/`deleted`/`locked`/`archived`/`inactive`/`ended`와 동일 패턴 |
@@ -39,6 +40,7 @@ DB 테이블·컬럼과 ES 필드 이름은 **snake_case**로 쓰고, `_`로 분
 | `err` | `error` | 오류 | 알고리즘 | - |
 | `file` | `file` | 파일 | 알고리즘 | - |
 | `fgpt` | `fingerprint` | - | 예외 | 관용어 — 알고리즘 결과 `fng`가 의미 불명확, 4자로 늘려 가독성 확보 |
+| `frs` | `first` | 첫 | 알고리즘 | - |
 | `hmn` | `human` | 사람 | 알고리즘 | - |
 | `idm` | `idempotency` | 멱등성 | 알고리즘 | - |
 | `id` | `identifier` | - | 예외 | 관용어(팀 합의) |
