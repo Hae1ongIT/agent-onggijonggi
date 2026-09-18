@@ -95,17 +95,22 @@ function ChatSession({
 }) {
   // reload·messages를 onError 클로저에서 바로 참조하면 선언 전 사용(TDZ)이 되므로 ref로 가리킨다.
   const appendRef = useRef<
-    ((message: { role: 'user'; content: string }) => unknown) | null
+    | ((message: {
+        role: 'user';
+        content: string;
+        id?: string;
+      }) => unknown)
+    | null
   >(null);
+  const reloadRef = useRef<(() => unknown) | null>(null);
   const messagesRef = useRef<Message[]>([]);
 
+  // onError 직후 곧바로 불리므로 "실패한 턴 = 배열의 마지막 메시지"가 항상 성립한다.
+  // reload()는 마지막 메시지가 user면 그 배열을 그대로 두고 같은 요청을 다시 보낸다 —
+  // clientMsgId가 되는 메시지 id가 자연히 유지돼야 서버 idempotency(이슈 #233)가
+  // 재시도를 알아본다. append로 새로 만들면 매번 다른 id가 나가 걸러지지 않는다.
   const retryLatestTurn = useCallback(() => {
-    const latestUser = [...messagesRef.current]
-      .reverse()
-      .find((message) => message.role === 'user');
-    if (latestUser) {
-      appendRef.current?.({ role: 'user', content: latestUser.content });
-    }
+    reloadRef.current?.();
   }, []);
 
   const setMessagesBridgeRef = useRef<
@@ -443,6 +448,7 @@ function ChatSession({
     input,
     setInput,
     append,
+    reload,
     isLoading,
     stop,
   } = useChat({
@@ -461,6 +467,7 @@ function ChatSession({
   });
 
   appendRef.current = append;
+  reloadRef.current = reload;
   messagesRef.current = messages;
   setMessagesRef.current = setMessages;
   setMessagesBridgeRef.current = setMessages;
@@ -477,7 +484,11 @@ function ChatSession({
       EMPTY_FAILED_MESSAGE_IDS,
   );
 
-  // reload()는 마지막 메시지가 user면 그대로 재전송한다 — 실패 메시지가 항상 마지막이므로 충분.
+  // 지목한 messageId가 배열의 마지막이 아닐 수 있어(예전 실패 메시지가 남은 채로 그 뒤에 다른
+  // 메시지를 성공적으로 보낸 경우) reload()로는 못 고친다 — reload()는 무조건 마지막 메시지를
+  // 재전송하므로 엉뚱한 메시지가 나갈 수 있다. 대신 원래 id를 그대로 지정해 append하고(이슈
+  // #233 — clientMsgId가 유지돼야 서버 idempotency가 재시도를 알아본다), 그 전에 배열에서
+  // 기존 실패 항목을 먼저 지운다 — 안 지우면 같은 id가 배열에 두 개 남는다.
   const handleResendFailedMessage = useCallback(
     (messageId: string) => {
       useChatSessionsStore.getState().clearMessageFailed(id, messageId);
@@ -485,10 +496,13 @@ function ChatSession({
         (message) => message.id === messageId,
       );
       if (failed?.role === 'user') {
-        append({ role: 'user', content: failed.content });
+        setMessages((previous) =>
+          previous.filter((message) => message.id !== messageId),
+        );
+        append({ role: 'user', content: failed.content, id: failed.id });
       }
     },
-    [append, id],
+    [append, id, setMessages],
   );
 
   const appendNewTurn = useCallback(

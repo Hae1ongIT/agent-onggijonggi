@@ -326,6 +326,29 @@ public class ThreadMessageDispatcher {
 		}
 	}
 
+	/**
+	* replay(이슈 #233)가 지금 이 방·세대에서 스트리밍 중인 턴과 같은 AGENT 메시지를 가리키는지
+	* 확인하고, 맞으면 지금까지 누적된 내용을 돌려준다. 방이 없거나, 활성 턴이 없거나, 다른
+	* 메시지를 가리키면(이미 끝났거나 고아) empty — 호출부가 DB 상태로 마저 분기한다.
+	*/
+	Optional<String> activeTurnContentIfMatches(UUID threadId, UUID roomGeneration, UUID agentMsgId) {
+		RoomAiState state = states.get(new RoomKey(threadId, roomGeneration));
+		if (state == null) {
+			return Optional.empty();
+		}
+		synchronized (state) {
+			if (state.closed || state.active == null || !agentMsgId.equals(state.active.msgId)) {
+				return Optional.empty();
+			}
+			return Optional.of(state.active.content.toString());
+		}
+	}
+
+	/** replay 응답 구성용(이슈 #233) — modelIdFor(PendingTurn)와 같은 기본값 규칙을 외부에 노출한다. */
+	String resolveModelId(String requestedModel) {
+		return requestedModel == null || requestedModel.isBlank() ? modelId : requestedModel;
+	}
+
 	/** 마지막 연결이 퇴장한 generation의 활성·대기 AI 작업을 즉시 취소한다. */
 	public void closeGeneration(UUID threadId, UUID roomGeneration) {
 		RoomKey key = new RoomKey(threadId, roomGeneration);
@@ -501,7 +524,7 @@ public class ThreadMessageDispatcher {
 
 	/** 발화가 모델을 지정하지 않았으면 서버 기본값(app.thread.ai.model)으로 돌아간다(이슈 #160). */
 	private String modelIdFor(PendingTurn turn) {
-		return turn.model() == null || turn.model().isBlank() ? modelId : turn.model();
+		return resolveModelId(turn.model());
 	}
 
 	/** 저장된 이력의 HUMAN/AGENT를 user/assistant로 매핑하고, 이번 멘션의 발화를 마지막에 붙인다. */
