@@ -97,7 +97,10 @@ public class DirectChatTurnService {
 		Msg orphaned = msgRepository.findById(orphanedAgentMsgId).orElseThrow(DirectChatTurnService::notFound);
 		orphaned.fail(MsgStatus.FAILED);
 		msgRepository.save(orphaned);
-		msgIdmKeyRepository.findByUserIdAndKey(userId, idempotencyKey).ifPresent(msgIdmKeyRepository::delete);
+		// 즉시 실행되는 삭제여야 한다 — 아래에서 appendToExisting이 곧 같은 키로 새 행을
+		// 저장하는데, 일반 delete()는 flush까지 미뤄져 Hibernate 기본 순서(INSERT 먼저)상
+		// 새 INSERT가 옛 행이 남은 채로 나가 유니크 인덱스와 충돌한다.
+		msgIdmKeyRepository.deleteImmediatelyByUserIdAndKey(userId, idempotencyKey);
 
 		Thr thread = thrRepository.findByIdForSeqUpdate(threadId).orElseThrow(DirectChatTurnService::notFound);
 		return appendToExisting(thread, userId, content, idempotencyKey);
@@ -107,11 +110,10 @@ public class DirectChatTurnService {
 	* 유효한 키가 있으면 그 결과를 replay=true로 돌려준다. content가 다르거나 threadId가
 	* 다르면(같은 사용자가 같은 clientMsgId를 다른 스레드에 재사용하는 경우 — 정상 경로에서는
 	* 안 나오지만, 우연·오용 모두 이 방으로 다른 방의 메시지·답변이 섞여 들어가는 걸 막는다)
-	* 클라이언트 버그·키 재사용 실수로 보고 거절한다 — 정상 재시도 경로(reload()·append(...,
-	* id: failed.id))는 원본 content·같은 스레드를 그대로 재사용하므로 이 분기는 순수
-	* 방어용이다. 키가 없으면 새 요청으로 본다(empty). TTL을 넘겼으면 옛 행을 지우고 새
-	* 요청으로 본다 — 지우지 않으면 뒤이은 저장이 (user_id, idm_key) 유니크 인덱스와
-	* 충돌한다.
+	* 클라이언트 버그·키 재사용 실수로 보고 거절한다 — 정상 재시도 경로(§6 참고, chat.tsx의
+	* retryLatestTurn이 같은 clientMsgId로 재전송)는 원본 content·같은 스레드를 그대로
+	* 재사용하므로 이 분기는 순수 방어용이다. 키가 없으면 새 요청으로 본다(empty). TTL을
+	* 넘겼으면 옛 행을 지우고 새 요청으로 본다 — 일반 delete()로는 부족하다(아래 참고).
 	*/
 	private Optional<StoredTurn> checkIdempotency(UUID threadId, UUID userId, String idempotencyKey, String content) {
 		Optional<MsgIdmKey> existing = msgIdmKeyRepository.findByUserIdAndKey(userId, idempotencyKey);
@@ -120,7 +122,11 @@ public class DirectChatTurnService {
 		}
 		MsgIdmKey key = existing.get();
 		if (isExpired(key)) {
-			msgIdmKeyRepository.delete(key);
+			// 즉시 실행되는 삭제여야 한다 — 이 메서드가 empty를 반환한 뒤 곧 호출부가 같은
+			// 키로 새 행을 저장하는데, 일반 delete()는 flush까지 미뤄져 Hibernate 기본 순서
+			// (INSERT 먼저)상 새 INSERT가 옛 행이 남은 채로 나가 유니크 인덱스와 충돌한다
+			// (PR #239 리뷰로 확인됨 — Mockito 단위 테스트로는 이 순서 문제를 못 잡는다).
+			msgIdmKeyRepository.deleteImmediatelyByUserIdAndKey(userId, idempotencyKey);
 			return Optional.empty();
 		}
 		if (!key.getContent().equals(content) || !key.getThrId().equals(threadId)) {

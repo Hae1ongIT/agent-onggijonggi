@@ -172,7 +172,7 @@ class DirectChatTurnServiceTest {
 		// 취급돼 정상 이어쓰기 경로(thr 조회)를 탔다는 뜻이다. replay 분기였다면 이 조회 자체가
 		// 없었을 것이다(위 replaysStoredTurnForTheSameKeyAndContentWithoutSavingAgain 참고).
 		verify(thrRepository).findByIdForSeqUpdate(threadId);
-		verify(msgIdmKeyRepository).delete(expired);
+		verify(msgIdmKeyRepository).deleteImmediatelyByUserIdAndKey(userId, "key-1");
 	}
 
 	/**
@@ -202,7 +202,6 @@ class DirectChatTurnServiceTest {
 		Msg orphaned = Msg.pendingAgent(orphanedAgentMsgId, threadId, 1L);
 		Thr thread = Thr.direct(threadId, userId, "안녕");
 		when(msgRepository.findById(orphanedAgentMsgId)).thenReturn(Optional.of(orphaned));
-		when(msgIdmKeyRepository.findByUserIdAndKey(userId, "key-1")).thenReturn(Optional.empty());
 		when(thrRepository.findByIdForSeqUpdate(threadId)).thenReturn(Optional.of(thread));
 		when(thrMbrRepository.findByThrIdAndUserIdAndRoleAndStatus(threadId, userId, ThrMbrRole.OWNER,
 				ThrMbrStatus.ACTIVE)).thenReturn(Optional.of(new ThrMbr(threadId, userId, ThrMbrRole.OWNER, userId)));
@@ -213,7 +212,7 @@ class DirectChatTurnServiceTest {
 
 		assertThat(fresh.replay()).isFalse();
 		assertThat(orphaned.getStatus()).isEqualTo(MsgStatus.FAILED);
-		verify(msgIdmKeyRepository).findByUserIdAndKey(userId, "key-1");
+		verify(msgIdmKeyRepository).deleteImmediatelyByUserIdAndKey(userId, "key-1");
 		verify(msgIdmKeyRepository).save(any(MsgIdmKey.class));
 	}
 
