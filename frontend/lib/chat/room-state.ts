@@ -1,6 +1,8 @@
 /********************************************************
- 파일명 : room-state.ts (lib/collab)
- 설 명 : 협업방에 도착한 WS 프레임(#8 계약)을 화면이 그릴 수 있는 상태로 축약한다(이슈 #19).
+ 파일명 : room-state.ts (lib/chat)
+ 설 명 : 방에 도착한 WS 프레임(#8 계약)을 화면이 그릴 수 있는 상태로 축약한다(이슈 #19).
+ 협업방과 1:1 방이 같은 프레임 계약을 쓰므로 축약 규칙도 하나다 — 그래서 lib/collab이 아니라
+ lib/chat에 둔다. 방 종류를 가르는 것은 이 파일이 아니라 구독을 거는 훅 쪽이다.
 
  React 밖의 순수 함수로 둔 이유는 두 가지다. 하나는 vitest 환경이 'node'라 컴포넌트를 띄우지
  않고 프레임 순서에 따른 결과만 시험할 수 있다는 것이고, 다른 하나는 이 축약이 화면보다 오래
@@ -17,13 +19,24 @@
  *********************************************************/
 
 import type { Citation } from '@/lib/api/chat';
-import type { CollabMessageItem } from '@/lib/api/collab';
 import { friendlyMessageForCode } from '@/lib/api/errors';
+import type { ThreadMessageItem } from '@/lib/api/thread-history';
 import type {
+  ChatAnswerFrame,
   PresenceParticipant,
   SystemNoticeFrame,
   WsFrame,
 } from '@/lib/transport/frames';
+
+/** chat.answer가 실어 보내는 진행 상태. 프레임 계약에서 그대로 따와 둘이 어긋나지 않게 한다. */
+type AnswerStatus = ChatAnswerFrame['status'];
+
+/** 평범한 완료가 아닌 종료인지. 화면이 "중지됨"·"거부됨"을 표시할 근거다. */
+function isTerminalStatus(
+  status: AnswerStatus,
+): status is 'cancelled' | 'denied' {
+  return status === 'cancelled' || status === 'denied';
+}
 
 /** 방에 접근할 수 없다는 뜻의 에러 코드(백엔드 ErrorFrame이 02·EDGE에서 쓰는 값). */
 const FORBIDDEN_CODE = 'FORBIDDEN';
@@ -33,7 +46,7 @@ const TERMINAL_AI_ERROR_CODES = new Set([
 ]);
 
 /** 메시지 하나. 사람과 AI를 role이 아니라 보낸 사람 유무로 가른다 — 협업방에는 보낸 사람이 여럿이다. */
-export interface CollabMessage {
+export interface RoomMessage {
   /** 서버가 준 msgId(이슈 #190). 이력과 실시간이 같은 메시지를 가리키는 근거다. */
   id: string;
   /** 방 안에서의 순서. 정렬과 따라잡기 커서로만 쓰고 연속성은 가정하지 않는다. */
@@ -43,6 +56,16 @@ export interface CollabMessage {
   content: string;
   /** AI 답변이 아직 흐르는 중인지. 사람 메시지는 언제나 false다. */
   streaming: boolean;
+  /**
+   * AI 답변이 평범하게 끝나지 않았다면 그 사유(이슈 #162, §3.2). 정상 종료·사람 메시지는 null이다.
+   *
+   * streaming과 겹치지 않는다 — streaming은 "아직 흐르는가"이고 이쪽은 "왜 끝났는가"다. 끝난
+   * 답변은 둘 다 봐야 화면이 "중지됨"과 평범한 완료를 가른다.
+   *
+   * 실시간 프레임(chat.answer.status)과 이력(MsgItem.status) 양쪽에서 채운다. 이력에서도
+   * 읽어야 방을 다시 열었을 때 중지 표시가 살아남는다.
+   */
+  terminalStatus: 'cancelled' | 'denied' | null;
   /**
    * 이 AI 답변을 불러낸 턴의 식별자(이슈 #160). 사람 메시지와 REST 이력은 null이다 —
    * 이력에는 저장되지 않는 값이고, 지나간 턴은 어차피 중지할 수 없기 때문이다.
@@ -67,20 +90,20 @@ export interface CollabMessage {
  * 붙는 순간 받는 참여자 명단(presence.snapshot)도 여기에 줄을 만들지 않는다 — 명단은
  * 사건이 아니라 상태다.
  */
-export interface CollabPresenceNotice {
+export interface RoomPresenceNotice {
   id: string;
   event: 'join' | 'leave';
   participant: PresenceParticipant;
 }
 
 /** 대화 흐름에 놓이는 것. 사람·AI 메시지이거나, 입퇴장 시스템 라인이다. */
-export type CollabEntry = CollabMessage | CollabPresenceNotice;
+export type RoomEntry = RoomMessage | RoomPresenceNotice;
 
 /** 시스템 라인인지. 판별 태그를 따로 두지 않고 event 유무로 가른다 — 메시지 쪽 모양을
  * 건드리지 않으려는 것이다. */
 export function isPresenceNotice(
-  entry: CollabEntry,
-): entry is CollabPresenceNotice {
+  entry: RoomEntry,
+): entry is RoomPresenceNotice {
   return 'event' in entry;
 }
 
@@ -117,7 +140,7 @@ export interface RoomError {
 export interface RoomState {
   /** 입장 순서대로의 참여자. 같은 사람의 join이 두 번 도착해도(재연결·스냅샷 재생) 한 번만 센다. */
   participants: PresenceParticipant[];
-  messages: CollabEntry[];
+  messages: RoomEntry[];
   /** 닫기 전까지 방 위에 남아 있는 알림. 도착 순서대로다. */
   notices: SystemNotice[];
   error: RoomError | null;
@@ -197,6 +220,7 @@ function appendMessage(
         from,
         content,
         streaming,
+        terminalStatus: null,
         turnId,
         citations: [],
         restrictedResultsOmitted: false,
@@ -227,10 +251,10 @@ function messageIndexById(state: RoomState, id: string): number | null {
  * 흐름 안에 없다.
  */
 function insertBySeq(
-  messages: CollabEntry[],
-  incoming: CollabMessage[],
+  messages: RoomEntry[],
+  incoming: RoomMessage[],
   cursor: number | null,
-): CollabEntry[] {
+): RoomEntry[] {
   const merged = [...messages];
   for (const message of incoming) {
     let index: number | null = null;
@@ -275,7 +299,7 @@ export function advanceCursor(current: number | null, seq: number): number {
  */
 export function applyHistory(
   state: RoomState,
-  items: CollabMessageItem[],
+  items: ThreadMessageItem[],
 ): RoomState {
   const known = new Set(
     state.messages
@@ -285,12 +309,17 @@ export function applyHistory(
   const restored = items
     .filter((item) => !known.has(item.id))
     .filter((item) => item.athKind !== 'SYSTEM')
-    .filter((item) => item.content !== '')
+    // 빈 본문은 아직 채워지지 않은 예약 행(PENDING)이라 그리지 않는다. 다만 중지·거부로 끝난
+    // 답변은 비는 것이 정상이고 그 사실 자체가 보여야 할 내용이라 예외로 남긴다 — 여기서
+    // 걸러 버리면 방을 다시 열었을 때 "중지됨"이 조용히 사라진다.
+    .filter(
+      (item) => item.content !== '' || terminalStatusOf(item.status) !== null,
+    )
     .sort((left, right) => left.seq - right.seq)
-    .map(toCollabMessage);
+    .map(toRoomMessage);
 
-  // 건너뛴 줄(SYSTEM·빈 본문)도 커서는 지나쳐야 한다 — 그러지 않으면 다음 따라잡기가 같은
-  // 것을 또 받아온다.
+  // 건너뛴 줄(SYSTEM·아직 빈 예약 행)도 커서는 지나쳐야 한다 — 그러지 않으면 다음 따라잡기가
+  // 같은 것을 또 받아온다.
   const lastSeq = items.reduce(
     (cursor, item) => advanceCursor(cursor, item.seq),
     state.lastSeq,
@@ -304,7 +333,7 @@ export function applyHistory(
 }
 
 /** 이력 한 줄을 화면이 아는 모양으로. subject는 WS 프레임의 from과 같은 값이다(이슈 #190). */
-function toCollabMessage(item: CollabMessageItem): CollabMessage {
+function toRoomMessage(item: ThreadMessageItem): RoomMessage {
   return {
     id: item.id,
     seq: item.seq,
@@ -317,10 +346,25 @@ function toCollabMessage(item: CollabMessageItem): CollabMessage {
         : null,
     content: item.content,
     streaming: false,
+    terminalStatus: terminalStatusOf(item.status),
     turnId: null,
     citations: [],
     restrictedResultsOmitted: false,
   };
+}
+
+/**
+ * 이력 행의 status를 화면이 쓰는 종료 사유로 옮긴다. 저장된 값은 대문자라 그대로 쓸 수 없다.
+ *
+ * FAILED는 남기지 않는다 — 실패는 사용자가 고른 결말이 아니라서 "중지됨"과 같은 자리에 두면
+ * 안 된다(실시간 경로에서 종결 오류를 terminalStatus 없이 끝내는 것과 같은 판단이다).
+ */
+function terminalStatusOf(
+  status: ThreadMessageItem['status'],
+): 'cancelled' | 'denied' | null {
+  if (status === 'CANCELLED') return 'cancelled';
+  if (status === 'DENIED') return 'denied';
+  return null;
 }
 
 /** 명단에 이미 있는 사람인지. 같은 사람인지는 subject로만 가른다 — 표시 이름은 바뀔 수 있다. */
@@ -395,17 +439,20 @@ function extendAnswer(
   state: RoomState,
   index: number,
   delta: string,
-  done: boolean,
+  status: AnswerStatus,
   citations: Citation[],
   restrictedResultsOmitted: boolean,
 ): RoomState {
   const messages = [...state.messages];
   // index는 streamingAnswerIndex가 고른 자리라 언제나 흐르는 중인 AI 답변이다.
-  const target = messages[index] as CollabMessage;
+  const target = messages[index] as RoomMessage;
   messages[index] = {
     ...target,
     content: target.content + delta,
-    streaming: !done,
+    // streaming 외의 모든 상태가 종료다 — 예전에는 done만 봐서 취소·거부된 답변이 영영 흐르는
+    // 중으로 남았다(COLLAB은 그 둘을 안 써서 드러나지 않던 구멍이다).
+    streaming: status === 'streaming',
+    terminalStatus: isTerminalStatus(status) ? status : null,
     citations: mergeCitations(target.citations, citations),
     restrictedResultsOmitted:
       target.restrictedResultsOmitted || restrictedResultsOmitted,
@@ -484,7 +531,6 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
       );
 
     case 'chat.answer': {
-      const done = frame.status === 'done';
       // 이전에는 "흐르는 중인 답변"을 뒤에서 찾았다. 이제 프레임이 자기 msgId를 들고 오므로
       // 그 값으로 직접 찾는다(이슈 #190) — 턴이 겹쳐도 어느 답변의 delta인지 분명하다.
       const index = messageIndexById(state, frame.msgId);
@@ -493,17 +539,22 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
           state,
           index,
           frame.delta,
-          done,
+          frame.status,
           frame.citations,
           frame.restrictedResultsOmitted,
         );
       }
       // 아직 아무것도 안 실린 패킷으로 빈 말풍선을 만들 이유는 없다 — delta 없이 status만
       // 알리는 패킷도 유효한 계약이다(frames.ts 주석).
+      //
+      // 다만 cancelled·denied는 예외다. 거부된 답변은 언제나 본문이 비고, 즉시 취소된 답변도
+      // 조각이 하나도 오지 않는다 — 여기서 걸러 버리면 "중지됨"을 걸어 둘 말풍선 자체가
+      // 없어져 사용자에게는 아무 일도 일어나지 않은 것처럼 보인다(이슈 #162, §3.2).
       if (
         frame.delta === '' &&
         frame.citations.length === 0 &&
-        !frame.restrictedResultsOmitted
+        !frame.restrictedResultsOmitted &&
+        !isTerminalStatus(frame.status)
       ) {
         return state;
       }
@@ -513,14 +564,14 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
         frame.seq,
         null,
         frame.delta,
-        !done,
+        frame.status === 'streaming',
         frame.turnId,
       );
       return extendAnswer(
         appended,
         appended.messages.length - 1,
         '',
-        done,
+        frame.status,
         frame.citations,
         frame.restrictedResultsOmitted,
       );
@@ -533,9 +584,11 @@ export function applyFrame(state: RoomState, frame: WsFrame): RoomState {
 
     case 'error': {
       const index = streamingAnswerIndex(state);
+      // 종결 오류는 흐름만 끊는다 — 중지·거부와 달리 사용자가 고른 결말이 아니라
+      // terminalStatus를 남기지 않는다. 사유는 방 위 배너(error)가 따로 알린다.
       const nextState =
         index !== null && TERMINAL_AI_ERROR_CODES.has(frame.code)
-          ? extendAnswer(state, index, '', true, [], false)
+          ? extendAnswer(state, index, '', 'done', [], false)
           : state;
       return {
         ...nextState,
