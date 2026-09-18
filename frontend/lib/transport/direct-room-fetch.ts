@@ -326,6 +326,7 @@ export function createDirectChatFetch(
     }
 
     const callbacks: FrameStreamCallbacks = {
+      allowInitialEmptyCitationResult: true,
       onChatCitation: options?.onChatCitation,
       onChatAnswerTerminal: (status) => {
         cleanup();

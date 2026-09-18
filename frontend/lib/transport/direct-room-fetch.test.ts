@@ -353,6 +353,41 @@ describe('createDirectChatFetch — DIRECT 전용 terminal 상태', () => {
     });
   });
 
+  it('DIRECT의 첫 빈 streaming 프레임을 citation 완료 결과로 넘긴다', async () => {
+    const onChatCitation = vi.fn();
+    const direct = createDirectChatFetch(THREAD_ID, {
+      startPromoted: true,
+      onChatCitation,
+    });
+    const responsePromise = direct.fetch('ignored', {
+      body: JSON.stringify({ messages: [{ role: 'user', content: '안녕' }] }),
+    });
+    const sub: FakeSubscription = subscribeRoom.mock.results[0].value;
+    const { turnId } = await sentChatMessage(sub);
+
+    sub.onFrame(
+      JSON.parse(
+        chatAnswer(turnId, {
+          delta: '',
+          citations: [],
+          restrictedResultsOmitted: false,
+          status: 'streaming',
+        }),
+      ),
+    );
+    sub.onFrame(
+      JSON.parse(chatAnswer(turnId, { delta: '응답', status: 'done' })),
+    );
+    const response = await responsePromise;
+    await response.text();
+
+    expect(onChatCitation).toHaveBeenCalledExactlyOnceWith({
+      citations: [],
+      restrictedResultsOmitted: false,
+      turnId,
+    });
+  });
+
   it('onSystemNotice는 턴 매칭 여부와 무관하게 방의 모든 notice를 전달한다', async () => {
     const onSystemNotice = vi.fn();
     const direct = createDirectChatFetch(THREAD_ID, {

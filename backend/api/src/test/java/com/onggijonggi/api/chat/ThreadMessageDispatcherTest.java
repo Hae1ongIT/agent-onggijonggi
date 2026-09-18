@@ -783,10 +783,10 @@ class ThreadMessageDispatcherTest {
 		verify(msgPersistenceService, never()).createPendingAgentMessageBlocking(any(), anyLong(), any());
 	}
 
-	/** DIRECT는 delta보다 먼저 citations 전용 chat.answer(delta="", STREAMING)를 보낸다(이슈
-	 * #163) — 답변이 끝나기 전에 근거 패널이 먼저 채워지는 UX 계약이다. */
+	/** DIRECT는 delta보다 먼저 빈 citations 전용 chat.answer(delta="", STREAMING)를 보내 loading을
+	 * 끝내고, RAG가 생길 때까지 근거 패널은 숨긴다. */
 	@Test
-	void directDispatchBroadcastsCitationsFrameBeforeTheFirstDeltaFrame() {
+	void directDispatchBroadcastsEmptyCitationsFrameBeforeTheFirstDeltaFrame() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
@@ -801,17 +801,16 @@ class ThreadMessageDispatcherTest {
 		assertThat(room.frames).filteredOn(ChatAnswerFrame.class::isInstance)
 				.extracting(frame -> ((ChatAnswerFrame) frame).delta(), frame -> ((ChatAnswerFrame) frame).status(),
 						frame -> ((ChatAnswerFrame) frame).citations().isEmpty())
-				.containsExactly(tuple("", ChatAnswerStatus.STREAMING, false), tuple("답", ChatAnswerStatus.STREAMING, true),
+				.containsExactly(tuple("", ChatAnswerStatus.STREAMING, true), tuple("답", ChatAnswerStatus.STREAMING, true),
 						tuple("", ChatAnswerStatus.DONE, true));
 		ChatAnswerFrame citationsFrame = (ChatAnswerFrame) room.frames.get(1);
-		assertThat(citationsFrame.citations()).extracting(Citation::docId).containsExactly("doc-001", "doc-014");
+		assertThat(citationsFrame.citations()).isEmpty();
 		assertThat(citationsFrame.restrictedResultsOmitted()).isFalse();
 	}
 
-	/** citations·restrictedResultsOmitted는 독립이다 — "기밀" 등 민감 질의는 고정 citations를
-	 * 그대로 두고 restrictedResultsOmitted만 true로 켠다(ChatAnswerFrame 계약). */
+	/** RAG와 권한 필터가 없으므로 질의 내용과 관계없이 빈 citations와 false를 보낸다. */
 	@Test
-	void directDispatchMarksRestrictedResultsOmittedForSensitiveQueries() {
+	void directDispatchDoesNotMarkRestrictedResultsOmittedWithoutRag() {
 		TestRoom room = new TestRoom();
 		LlmChatStreamService llm = mock(LlmChatStreamService.class);
 		when(llm.streamChat(any())).thenReturn(Flux.just("답"));
@@ -825,8 +824,8 @@ class ThreadMessageDispatcherTest {
 		awaitFrameCount(room.frames, 4);
 		ChatAnswerFrame citationsFrame = (ChatAnswerFrame) room.frames.get(1);
 		assertThat(citationsFrame.delta()).isEmpty();
-		assertThat(citationsFrame.citations()).isNotEmpty();
-		assertThat(citationsFrame.restrictedResultsOmitted()).isTrue();
+		assertThat(citationsFrame.citations()).isEmpty();
+		assertThat(citationsFrame.restrictedResultsOmitted()).isFalse();
 	}
 
 	/** AI FIFO 초과는 DIRECT만 예약된 PENDING AGENT를 즉시 DENIED로 닫고 chat.answer(denied)를
