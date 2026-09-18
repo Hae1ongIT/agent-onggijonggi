@@ -1,0 +1,69 @@
+name: Release Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 다음 버전 계산 및 태깅
+        id: tag
+        run: |
+          set -euo pipefail
+
+          last_tag=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$last_tag" ]; then
+            last_tag="v0.0.0"
+            range="HEAD"
+          else
+            range="${last_tag}..HEAD"
+          fi
+
+          bump="patch"
+          while IFS= read -r commit; do
+            [ -z "$commit" ] && continue
+            subject=$(git log -1 --format=%s "$commit")
+            body=$(git log -1 --format=%B "$commit")
+            if [[ "$subject" =~ ^[a-zA-Z]+(\([^)]*\))?!: ]] || grep -q '^BREAKING CHANGE:' <<< "$body"; then
+              bump="major"
+              break
+            elif [[ "$subject" =~ ^feat(\([^)]*\))?: ]]; then
+              bump="minor"
+            fi
+          done < <(git log "$range" --format=%H 2>/dev/null || true)
+
+          version="${last_tag#v}"
+          IFS='.' read -r major minor patch <<< "$version"
+
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          new_tag="v${major}.${minor}.${patch}"
+          echo "last_tag=${last_tag}" >> "$GITHUB_OUTPUT"
+          echo "new_tag=${new_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: 태그 생성 및 push
+        run: |
+          git tag "${{ steps.tag.outputs.new_tag }}"
+          git push origin "${{ steps.tag.outputs.new_tag }}"
+
+      - name: GitHub Release 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.new_tag }}" \
+            --title "${{ steps.tag.outputs.new_tag }}" \
+            --generate-notes \
+            --notes-start-tag "${{ steps.tag.outputs.last_tag }}"
