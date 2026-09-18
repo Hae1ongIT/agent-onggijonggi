@@ -184,7 +184,8 @@ class RiskCheckBatchServiceTest {
 
 	/**
 	 * 기존(마이그레이션 이전부터 있던) 커서가 있는 방은 다음 스캔에서 seq=0을 소급 검사한다
-	 * (이슈 #234). 새 메시지가 없는 조용한 방이어도(§2.2 "순서 주의") 이 검사가 실행돼야 한다.
+	 * (이슈 #234). 이 소급 검사는 새 메시지 유무를 보는 조기 return과 독립된 분기라, 새
+	 * 메시지가 없는 조용한 방이어도 실행돼야 한다.
 	 */
 	@Test
 	void backfillsSeqZeroForAnExistingCursorEvenWhenTheRoomIsQuiet() {
@@ -263,7 +264,8 @@ class RiskCheckBatchServiceTest {
 
 	/**
 	 * "마이그레이션 이전부터 있던 커서"(frsSeqChc=false)를 재현한다 — 생성자는 항상 true로
-	 * 시작하므로(§2.2, 새로 만드는 커서는 백필이 필요 없다) 리플렉션으로 그 상태만 되돌린다.
+	 * 시작해(새로 만드는 커서는 수정된 스캔으로 seq=0부터 이미 포함되므로 백필이 필요 없다)
+	 * 이 상태를 직접 만들 수 없어, 리플렉션으로 그 필드값만 되돌린다.
 	 */
 	private static void markAsPreMigrationCursor(ThrRiskCursor cursor) {
 		try {
