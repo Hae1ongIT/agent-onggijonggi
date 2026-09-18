@@ -351,11 +351,13 @@ public class ThreadWebSocketHandler implements WebSocketHandler {
 	* 돌려준다. rejectIfLocked·dispatcher 큐에는 들어가지 않는다 — 새 발화가 아니라 기존 결과를
 	* 돌려주는 것뿐이라 FIFO·레이트리밋(#74)을 소모하지 않는다.
 	*
-	* 아직 스트리밍 중이면(RoomAiState.active와 agentMsgId 일치) 지금까지 누적된 내용을 그
-	* turnId로 담아 보낸다 — mergeOtherTurnAnswer(프런트)의 "처음 본 프레임=시작 텍스트" 경로가
-	* 캐치업 역할을 한다. 이미 끝났으면(COMPLETE·CANCELLED·DENIED) 저장된 결과를, FAILED면
-	* ChatAnswerStatus에 FAILED가 없어 ErrorFrame을 대신 보낸다. DB는 PENDING인데 메모리엔
-	* 없으면(서버 재시작 등으로 고아) 새 발화로 복구한다.
+	* 그 턴이 아직 살아있으면(진행 중이거나 FIFO 대기 중이거나 워커가 아직 안 꺼낸 —
+	* ThreadMessageDispatcher.activeTurnContentIfMatches 참고) 지금까지 누적된 내용(대기
+	* 중이면 빈 문자열)을 그 turnId로 담아 보낸다 — mergeOtherTurnAnswer(프런트)의 "처음 본
+	* 프레임=시작 텍스트" 경로가 캐치업 역할을 한다. 이미 끝났으면(COMPLETE·CANCELLED·DENIED)
+	* 저장된 결과를, FAILED면 ChatAnswerStatus에 FAILED가 없어 ErrorFrame을 대신 보낸다. DB는
+	* PENDING인데 메모리 어디에도(활성·대기·인플라이트) 없으면(서버 재시작 등으로 진짜 고아)
+	* 새 발화로 복구한다.
 	*/
 	private Mono<WsFrame> handleDirectReplay(UUID threadId, UUID roomGeneration, Connection connection,
 			PresenceParticipant actor, InboundChatMessage inbound, String traceId,

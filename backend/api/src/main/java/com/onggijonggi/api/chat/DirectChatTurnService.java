@@ -62,7 +62,7 @@ public class DirectChatTurnService {
 	@Transactional
 	public StoredTurn prepareOrCreateWithPendingAgentBlocking(UUID threadId, UUID userId, String content,
 			String title, String idempotencyKey) {
-		Optional<StoredTurn> replay = checkIdempotency(userId, idempotencyKey, content);
+		Optional<StoredTurn> replay = checkIdempotency(threadId, userId, idempotencyKey, content);
 		if (replay.isPresent()) {
 			return replay.get();
 		}
@@ -76,7 +76,7 @@ public class DirectChatTurnService {
 	@Transactional
 	public StoredTurn prepareExistingWithPendingAgentBlocking(UUID threadId, UUID userId, String content,
 			String idempotencyKey) {
-		Optional<StoredTurn> replay = checkIdempotency(userId, idempotencyKey, content);
+		Optional<StoredTurn> replay = checkIdempotency(threadId, userId, idempotencyKey, content);
 		if (replay.isPresent()) {
 			return replay.get();
 		}
@@ -104,18 +104,26 @@ public class DirectChatTurnService {
 	}
 
 	/**
-	* 유효한 키가 있으면 그 결과를 replay=true로 돌려준다. content가 다르면 클라이언트
-	* 버그·키 재사용 실수로 보고 거절한다 — 정상 재시도 경로(reload()·append(...,
-	* id: failed.id))는 원본 content를 그대로 재사용하므로 이 분기는 순수 방어용이다.
-	* 키가 없거나 TTL을 넘었으면 새 요청으로 본다(empty).
+	* 유효한 키가 있으면 그 결과를 replay=true로 돌려준다. content가 다르거나 threadId가
+	* 다르면(같은 사용자가 같은 clientMsgId를 다른 스레드에 재사용하는 경우 — 정상 경로에서는
+	* 안 나오지만, 우연·오용 모두 이 방으로 다른 방의 메시지·답변이 섞여 들어가는 걸 막는다)
+	* 클라이언트 버그·키 재사용 실수로 보고 거절한다 — 정상 재시도 경로(reload()·append(...,
+	* id: failed.id))는 원본 content·같은 스레드를 그대로 재사용하므로 이 분기는 순수
+	* 방어용이다. 키가 없으면 새 요청으로 본다(empty). TTL을 넘겼으면 옛 행을 지우고 새
+	* 요청으로 본다 — 지우지 않으면 뒤이은 저장이 (user_id, idm_key) 유니크 인덱스와
+	* 충돌한다.
 	*/
-	private Optional<StoredTurn> checkIdempotency(UUID userId, String idempotencyKey, String content) {
+	private Optional<StoredTurn> checkIdempotency(UUID threadId, UUID userId, String idempotencyKey, String content) {
 		Optional<MsgIdmKey> existing = msgIdmKeyRepository.findByUserIdAndKey(userId, idempotencyKey);
-		if (existing.isEmpty() || isExpired(existing.get())) {
+		if (existing.isEmpty()) {
 			return Optional.empty();
 		}
 		MsgIdmKey key = existing.get();
-		if (!key.getContent().equals(content)) {
+		if (isExpired(key)) {
+			msgIdmKeyRepository.delete(key);
+			return Optional.empty();
+		}
+		if (!key.getContent().equals(content) || !key.getThrId().equals(threadId)) {
 			throw new IdempotencyKeyConflictException();
 		}
 		Msg agentMsg = msgRepository.findById(key.getAgentMsgId()).orElseThrow(DirectChatTurnService::notFound);

@@ -149,9 +149,12 @@ class DirectChatTurnServiceTest {
 				.isInstanceOf(IdempotencyKeyConflictException.class);
 	}
 
-	/** TTL(5분)을 넘긴 키는 새 요청으로 취급한다. */
+	/**
+	 * TTL(5분)을 넘긴 키는 새 요청으로 취급하고, 옛 행을 지운다 — 지우지 않으면 뒤이은 저장이
+	 * (user_id, idm_key) 유니크 인덱스와 충돌해 TTL 만료 뒤 재시도가 매번 실패한다.
+	 */
 	@Test
-	void treatsAnExpiredKeyAsANewRequest() throws Exception {
+	void treatsAnExpiredKeyAsANewRequestAndDeletesTheStaleRow() throws Exception {
 		UUID threadId = UUID.randomUUID();
 		UUID userId = UUID.randomUUID();
 		MsgIdmKey expired = new MsgIdmKey(userId, "key-1", "안녕", threadId, UUID.randomUUID(), 0L,
@@ -169,6 +172,25 @@ class DirectChatTurnServiceTest {
 		// 취급돼 정상 이어쓰기 경로(thr 조회)를 탔다는 뜻이다. replay 분기였다면 이 조회 자체가
 		// 없었을 것이다(위 replaysStoredTurnForTheSameKeyAndContentWithoutSavingAgain 참고).
 		verify(thrRepository).findByIdForSeqUpdate(threadId);
+		verify(msgIdmKeyRepository).delete(expired);
+	}
+
+	/**
+	 * 같은 사용자가 같은 clientMsgId를 다른 스레드에 재사용하면(정상 경로에서는 안 나오지만)
+	 * 엉뚱한 스레드의 메시지·답변이 섞여 들어가는 걸 막는다 — content 불일치와 같은 충돌로
+	 * 다룬다.
+	 */
+	@Test
+	void rejectsTheSameKeyUsedForADifferentThread() {
+		UUID threadId = UUID.randomUUID();
+		UUID otherThreadId = UUID.randomUUID();
+		UUID userId = UUID.randomUUID();
+		MsgIdmKey existing = new MsgIdmKey(userId, "key-1", "안녕", otherThreadId, UUID.randomUUID(), 0L,
+				UUID.randomUUID(), 1L);
+		when(msgIdmKeyRepository.findByUserIdAndKey(userId, "key-1")).thenReturn(Optional.of(existing));
+
+		assertThatThrownBy(() -> service.prepareExistingWithPendingAgentBlocking(threadId, userId, "안녕", "key-1"))
+				.isInstanceOf(IdempotencyKeyConflictException.class);
 	}
 
 	/** 서버 재시작 등으로 고아가 된 PENDING 턴은 FAILED로 닫고 옛 키를 지운 뒤 새 발화로 진행한다. */
