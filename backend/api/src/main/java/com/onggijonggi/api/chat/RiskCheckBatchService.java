@@ -77,35 +77,62 @@ public class RiskCheckBatchService {
 		}
 	}
 
+	/**
+	* 커서가 있고 아직 seq=0을 확인하지 않았으면(이슈 #234) 조기 return과 무관하게 먼저
+	* 소급 검사한다 — 새 메시지가 없는 조용한 기존 방도 빠뜨리지 않기 위해서다. 커서를
+	* 한 번만 fetch해 두 분기가 같은 인스턴스를 공유하고, 트랜잭션 안에서 최대 한 번만
+	* 저장한다.
+	*/
 	@Transactional
 	void scanThread(Thr thr) {
-		long lastSeq = thrRiskCursorRepository.findById(thr.getId()).map(ThrRiskCursor::getLastSeq).orElse(0L);
+		ThrRiskCursor cursor = thrRiskCursorRepository.findById(thr.getId()).orElse(null);
+		boolean cursorChanged = false;
+
+		if (cursor != null && !cursor.isFrsSeqChc()) {
+			msgRepository.findByThrIdAndAthKindAndSeq(thr.getId(), AthKind.HUMAN, 0L)
+					.ifPresent(seq0 -> {
+						if (riskClassifier.isRisky(seq0.getContent())) {
+							persistRiskNotice(thr.getId(), false);
+						}
+					});
+			cursor.markFrsSeqChc();
+			cursorChanged = true;
+		}
+
+		long lastSeq = cursor != null ? cursor.getLastSeq() : -1L;
 		List<Msg> newMessages = msgRepository.findByThrIdAndAthKindAndSeqGreaterThanOrderBySeqAsc(thr.getId(),
 				AthKind.HUMAN, lastSeq);
-		if (newMessages.isEmpty()) {
-			return;
-		}
-		for (Msg message : newMessages) {
-			if (riskClassifier.isRisky(message.getContent())) {
-				persistRiskNotice(thr.getId());
+		if (!newMessages.isEmpty()) {
+			for (Msg message : newMessages) {
+				if (riskClassifier.isRisky(message.getContent())) {
+					persistRiskNotice(thr.getId(), true);
+				}
 			}
+			advanceCursor(cursor, thr.getId(), newMessages.get(newMessages.size() - 1).getSeq());
+		} else if (cursorChanged) {
+			thrRiskCursorRepository.save(cursor);
 		}
-		advanceCursor(thr.getId(), newMessages.get(newMessages.size() - 1).getSeq());
 	}
 
-	private void persistRiskNotice(UUID threadId) {
+	/**
+	* notifyLive=false는 소급 백필(이슈 #234)이 발견한 오래된 위험 발화용이다 — 이력에는
+	* 남기되, 지금 접속 중인 사람에게 옛 메시지에 대한 실시간 경고를 새삼 띄우지 않는다.
+	*/
+	private void persistRiskNotice(UUID threadId, boolean notifyLive) {
 		long seq = thrRepository.allocateNextSeq(threadId);
 		msgRepository.save(Msg.system(threadId, seq, RISK_NOTICE));
-		roomSessionRegistry.notifyIfListening(threadId,
-				new SystemNoticeFrame(threadId, "warning", RISKY_CONTENT_CODE, RISK_NOTICE,
-						UUID.randomUUID().toString()));
+		if (notifyLive) {
+			roomSessionRegistry.notifyIfListening(threadId,
+					new SystemNoticeFrame(threadId, "warning", RISKY_CONTENT_CODE, RISK_NOTICE,
+							UUID.randomUUID().toString()));
+		}
 	}
 
-	private void advanceCursor(UUID threadId, long seq) {
-		ThrRiskCursor cursor = thrRiskCursorRepository.findById(threadId)
-				.orElseGet(() -> new ThrRiskCursor(threadId));
-		cursor.advanceTo(seq);
-		thrRiskCursorRepository.save(cursor);
+	/** cursor는 scanThread가 이미 fetch해둔 인스턴스다(없으면 null) — 다시 조회하지 않는다. */
+	private void advanceCursor(ThrRiskCursor cursor, UUID threadId, long seq) {
+		ThrRiskCursor target = cursor != null ? cursor : new ThrRiskCursor(threadId);
+		target.advanceTo(seq);
+		thrRiskCursorRepository.save(target);
 	}
 
 }
