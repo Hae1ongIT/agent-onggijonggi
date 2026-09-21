@@ -116,6 +116,25 @@ class CutoverValidationPostgresTest extends PostgresSpringTestBase {
 		assertThat(jdbc.queryForObject("select tnn_key from stg_user_cur_tnn where user_id = ?", String.class, owner)).isEqualTo("acme");
 	}
 
+	@Test
+	void comparesAccountsThatAreInactiveHereButStillEnabledInKeycloak() {
+		// 계정 비활성화는 Keycloak을 끄지 않고 재활성화 경로도 있다. 그런 사람이 DIRECT owner인데 Tenant가 어긋나면
+		// 지금 막지 않으면 되살아난 뒤 자기 방을 잃는다. 제외 기준은 Keycloak 상태뿐이다(0001 3.7.4).
+		String tag = UUID.randomUUID().toString().substring(0, 8);
+		UUID dormant = user("dormant-" + tag);
+		jdbc.update("update app_user set status = 'INACTIVE', inactive_at = now() where id = ?", dormant);
+		UUID direct = thread("DIRECT", dormant);
+		stage(direct, "acme");
+
+		CutoverValidationResult result = validation
+				.validate(List.of(new KeycloakTenantUser("dormant-" + tag, Optional.of("beta"))));
+
+		assertThat(result.ownerMismatches()).extracting(CutoverValidationResult.OwnerTenantMismatch::threadId)
+				.contains(direct);
+		assertThat(jdbc.queryForObject("select tnn_key from stg_user_cur_tnn where user_id = ?", String.class, dormant))
+				.isEqualTo("beta");
+	}
+
 	private UUID user(String subject) {
 		UUID id = UUID.randomUUID();
 		jdbc.update("insert into app_user (id, keycloak_subj) values (?, ?)", id, subject);

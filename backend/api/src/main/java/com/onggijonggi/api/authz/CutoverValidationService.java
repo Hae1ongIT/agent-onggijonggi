@@ -5,7 +5,6 @@ import com.onggijonggi.common.authz.StagingUserCurrentTenant;
 import com.onggijonggi.common.authz.StagingUserCurrentTenantRepository;
 import com.onggijonggi.common.user.AppUser;
 import com.onggijonggi.common.user.AppUserRepository;
-import com.onggijonggi.common.user.AppUserStatus;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -26,6 +25,8 @@ import org.springframework.transaction.annotation.Transactional;
  *               Tenant와 대조해 OWNER 불일치(절체 중단)와 비OWNER 참여자 불일치(회수 예정)를 나눠 보고한다(0001 7.0·8.1).
  *               Flyway SQL은 Keycloak을 부를 수 없어서 이 검증이 배포 1 앱의 PLATFORM_ADMIN API로 존재한다.
  *               Keycloak에서 비활성이거나 없는 계정은 속성을 볼 수 없고 로그인도 못 하므로 기록·대조·회수에서 뺀다.
+ *               제외 기준은 Keycloak 상태뿐이고 `app_user.status`는 보지 않는다 — 우리 쪽 비활성 계정도 재활성화될 수
+ *               있어서, 그 사람이 DIRECT owner면 Tenant 불일치를 지금 잡아야 한다(0001 3.7.4 「절체 대조 대상」).
  */
 @Service
 public class CutoverValidationService {
@@ -53,12 +54,13 @@ public class CutoverValidationService {
 		List<String> invalidSubjects = tenantBySubject.entrySet().stream()
 				.filter(entry -> entry.getValue().isEmpty()).map(Map.Entry::getKey).sorted().toList();
 
-		// 대조 대상: DB에서 ACTIVE이고 Keycloak에서도 활성인 계정. 속성이 유효하면 그 Tenant를 staging에 기록한다.
+		// 대조 대상은 Keycloak에서 활성인 계정이다. 기준을 Keycloak 상태 하나로 두는 이유는, 우리 쪽에서 비활성으로
+		// 표시된 계정이라도 Keycloak 속성을 읽을 수 있고 재활성화될 수 있기 때문이다(계정 비활성화는 Keycloak을 끄지
+		// 않는다). 그런 사람이 DIRECT owner인데 Tenant가 어긋나면 절체를 막아야 한다 — 되살아난 뒤 자기 방을 잃는다.
 		Map<UUID, String> currentTenantByUser = new HashMap<>();
 		Set<UUID> comparableUsers = new HashSet<>();
 		List<StagingUserCurrentTenant> staged = new ArrayList<>();
 		for (AppUser user : appUserRepository.findAll()) {
-			if (user.getStatus() != AppUserStatus.ACTIVE) continue;
 			Optional<String> tenant = tenantBySubject.get(user.getKeycloakSubj());
 			if (tenant == null) continue; // Keycloak에서 비활성이거나 없다 — 대조하지 않는다.
 			comparableUsers.add(user.getId());
