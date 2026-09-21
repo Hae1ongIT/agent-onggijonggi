@@ -49,7 +49,7 @@ class RbacSwitchIndependenceTest {
 
 		ResponseEntity<RbacBootstrapResult> response = controller(bootstrap).retryBootstrap().block();
 
-		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+		assertThat(response.getStatusCode().value()).isEqualTo(422);
 		assertThat(response.getBody().failures()).containsExactly("tenant acme: tnn_key가 중복이다",
 				"tenant acme org_unit sales: COMMON VIEWER 부여가 선언돼 있지 않다");
 		assertThat(response.getBody().processedTenants()).isEmpty();

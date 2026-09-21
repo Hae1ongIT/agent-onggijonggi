@@ -2,6 +2,20 @@
 -- 기존 Thread 계열의 Tenant 컬럼은 다음 migration이 nullable로 확장하고, NOT NULL·복합 FK는 절체 PR이 강제한다.
 -- 규칙(0001 6.0·6.2·6.4·6.14)을 DB가 직접 지키게 하는 것이 목적이라 trigger와 CHECK를 함께 둔다.
 
+-- tnn_key·org_unit_key·node_key는 bootstrap 설정과 Keycloak claim이 가리키는 안정 식별자라 만든 뒤 바꿀 수 없다.
+-- 이름이 바뀌어도 key는 그대로여야 하고, 다르게 쓰고 싶으면 새 행을 만든다. 어떤 계정이 UPDATE해도 거부한다.
+create or replace function key_immutable_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+    if to_jsonb(new) ->> tg_argv[0] is distinct from to_jsonb(old) ->> tg_argv[0] then
+        raise exception '% is immutable', tg_argv[0];
+    end if;
+    return new;
+end;
+$$;
+
 create table tnn (
     id          uuid         not null,
     tnn_key     varchar(64)  not null,
@@ -16,6 +30,10 @@ create table tnn (
     constraint tnn_status_time check ((status = 'ACTIVE') = (inactive_at is null)),
     constraint uq_tnn_key unique (tnn_key)
 );
+
+create trigger trg_tnn_key_immutable
+before update of tnn_key on tnn
+for each row execute function key_immutable_guard('tnn_key');
 
 create table org_unit (
     id           uuid         not null,
@@ -34,6 +52,10 @@ create table org_unit (
     constraint uq_org_unit_tnn_id unique (tnn_id, id),
     constraint uq_org_unit_tnn_key unique (tnn_id, org_unit_key)
 );
+
+create trigger trg_org_unit_key_immutable
+before update of org_unit_key on org_unit
+for each row execute function key_immutable_guard('org_unit_key');
 
 create table wrk_node (
     id          uuid         not null,
@@ -59,6 +81,10 @@ create table wrk_node (
     constraint wrk_node_status_time check ((status = 'ACTIVE') = (inactive_at is null)),
     constraint uq_wrk_node_tnn_key unique (tnn_id, node_key)
 );
+
+create trigger trg_wrk_node_key_immutable
+before update of node_key on wrk_node
+for each row execute function key_immutable_guard('node_key');
 
 -- 같은 부모 아래 활성 형제의 이름은 종류와 무관하게 유일하다(대소문자 무시, 루트의 null 부모도 같은 규칙).
 create unique index ux_wrk_node_active_sibling_name

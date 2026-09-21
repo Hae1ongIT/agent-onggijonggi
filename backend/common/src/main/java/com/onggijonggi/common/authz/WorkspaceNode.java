@@ -23,7 +23,7 @@ public class WorkspaceNode {
 	private UUID tenantId;
 	@Column(name = "prn_id")
 	private UUID parentId;
-	@Column(name = "node_key", nullable = false)
+	@Column(name = "node_key", nullable = false, updatable = false)
 	private String key;
 	@Enumerated(EnumType.STRING)
 	@Column(nullable = false)

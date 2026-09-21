@@ -36,7 +36,7 @@ public class PlatformRbacController {
 	public Mono<ResponseEntity<RbacBootstrapResult>> retryBootstrap() {
 		return Mono.fromCallable(() -> ResponseEntity.ok(bootstrapService.runCurrentConfiguration()))
 				.onErrorResume(RbacBootstrapConfigurationException.class,
-						exception -> Mono.just(ResponseEntity.unprocessableEntity().body(new RbacBootstrapResult(
+						exception -> Mono.just(ResponseEntity.unprocessableContent().body(new RbacBootstrapResult(
 								List.of(), List.of(), List.of(), List.of(), exception.getProblems()))))
 				.subscribeOn(Schedulers.boundedElastic());
 	}

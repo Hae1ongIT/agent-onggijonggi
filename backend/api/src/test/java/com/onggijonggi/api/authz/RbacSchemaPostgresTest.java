@@ -252,6 +252,55 @@ class RbacSchemaPostgresTest {
 
 	// ------------------------------------------------------------------ 권한 변경 감사
 
+	// ------------------------------------------------------------------ 불변 key
+	// tnn_key·org_unit_key·node_key는 bootstrap 설정과 Keycloak claim이 가리키는 안정 식별자다. 값이 바뀌는 UPDATE는
+	// 거부하고, 이름·상태 변경과 같은 값으로 다시 쓰는 UPDATE는 통과해야 한다(SQLState P0001 = trigger의 raise exception).
+
+	@Test
+	void tenantKeyCannotBeChanged() throws SQLException {
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "acme");
+
+			assertRejected("P0001", "tnn_key is immutable", () -> execute(c, "update tnn set tnn_key = 'globex' where id = ?", tenant));
+			// 형식이 올바르지 않은 값이어도 key 불변이 먼저 거부한다.
+			assertRejected("P0001", "tnn_key is immutable", () -> execute(c, "update tnn set tnn_key = 'Bad Key' where id = ?", tenant));
+
+			execute(c, "update tnn set name = 'ACME Corp', tnn_key = tnn_key where id = ?", tenant);
+			assertThat(query(c, "select tnn_key from tnn where id = ?", tenant)).isEqualTo("acme");
+		}
+	}
+
+	@Test
+	void orgUnitKeyCannotBeChanged() throws SQLException {
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "acme");
+			UUID unit = orgUnit(c, tenant, "sales");
+
+			assertRejected("P0001", "org_unit_key is immutable", () -> execute(c, "update org_unit set org_unit_key = 'ops' where id = ?", unit));
+
+			execute(c, "update org_unit set name = '영업본부', org_unit_key = org_unit_key where id = ?", unit);
+			assertThat(query(c, "select org_unit_key from org_unit where id = ?", unit)).isEqualTo("sales");
+		}
+	}
+
+	@Test
+	void nodeKeyCannotBeChanged() throws SQLException {
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "acme");
+			UUID root = root(c, tenant);
+			UUID common = node(c, tenant, root, "common", "COMMON", "Common");
+			UUID sales = node(c, tenant, root, "sales-hq", "ORG", "Sales HQ");
+
+			assertRejected("P0001", "node_key is immutable", () -> execute(c, "update wrk_node set node_key = 'sales-two' where id = ?", sales));
+			// ROOT·COMMON의 예약 key도 다른 값으로 바꿀 수 없다.
+			assertRejected("P0001", "node_key is immutable", () -> execute(c, "update wrk_node set node_key = 'top' where id = ?", root));
+			assertRejected("P0001", "node_key is immutable", () -> execute(c, "update wrk_node set node_key = 'shared' where id = ?", common));
+
+			execute(c, "update wrk_node set name = 'Sales Headquarters', node_key = node_key where id = ?", sales);
+			assertThat(query(c, "select node_key from wrk_node where id = ?", sales)).isEqualTo("sales-hq");
+		}
+	}
+
 	@Test
 	void authorizationAuditRowsAreImmutableEvenForSuperusers() throws SQLException {
 		// DB-TST-014A(UPDATE·DELETE 거부, FK는 tnn·행위자만), 058(계정과 무관한 append-only)

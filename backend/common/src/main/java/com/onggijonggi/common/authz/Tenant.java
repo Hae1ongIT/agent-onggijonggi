@@ -20,7 +20,7 @@ public class Tenant {
 	@Id
 	private UUID id;
 
-	@Column(name = "tnn_key", nullable = false, unique = true)
+	@Column(name = "tnn_key", nullable = false, unique = true, updatable = false)
 	private String key;
 
 	@Column(nullable = false)

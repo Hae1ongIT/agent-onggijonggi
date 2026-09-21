@@ -21,7 +21,7 @@ public class OrgUnit {
 	private UUID id;
 	@Column(name = "tnn_id", nullable = false)
 	private UUID tenantId;
-	@Column(name = "org_unit_key", nullable = false)
+	@Column(name = "org_unit_key", nullable = false, updatable = false)
 	private String key;
 	@Column(nullable = false)
 	private String name;
