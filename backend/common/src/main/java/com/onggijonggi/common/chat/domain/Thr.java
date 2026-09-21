@@ -37,6 +37,12 @@ public class Thr {
 	@Column(name = "drc_own_user_id")
 	private UUID drcOwnUserId;
 
+	@Column(name = "tnn_id")
+	private UUID tenantId;
+
+	@Column(name = "wrk_node_id")
+	private UUID workspaceNodeId;
+
 	@Column(name = "created_user_id", nullable = false)
 	private UUID createdUserId;
 
@@ -105,6 +111,14 @@ public class Thr {
 
 	public UUID getDrcOwnUserId() {
 		return drcOwnUserId;
+	}
+
+	public UUID getTenantId() {
+		return tenantId;
+	}
+
+	public UUID getWorkspaceNodeId() {
+		return workspaceNodeId;
 	}
 
 	public UUID getCreatedUserId() {
