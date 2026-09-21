@@ -23,7 +23,9 @@ import org.springframework.transaction.annotation.Transactional;
  *               만들지 않고 최초 결과를 그대로 돌려준다. 같은 키에 다른 title이 오면 거절한다 —
  *               title 자체가 key는 아니지만, 확인 없이 통과시키면 키 재사용 실수를 못 잡는다.
  *               키가 없는 호출(idempotencyKey == null)은 이 계약을 요구하지 않은 것으로 보고
- *               기존과 동일하게 매번 새로 만든다.
+ *               기존과 동일하게 매번 새로 만든다. TTL이 지난 키는 새 요청으로 취급하기 전에
+ *               옛 행을 즉시 삭제한다(이슈 #240) — 그대로 두면 새 키 저장이 유니크 인덱스와
+ *               충돌한다.
  */
 @Service
 public class CollabThreadCreationService {
@@ -52,8 +54,11 @@ public class CollabThreadCreationService {
 	public UUID createBlocking(UUID actorUserId, String title, String idempotencyKey) {
 		if (idempotencyKey != null) {
 			Optional<ThrIdmKey> existing = thrIdmKeyRepository.findByUserIdAndKey(actorUserId, idempotencyKey);
-			if (existing.isPresent() && !isExpired(existing.get())) {
-				return sameThreadOrConflict(existing.get(), title);
+			if (existing.isPresent()) {
+				if (!isExpired(existing.get())) {
+					return sameThreadOrConflict(existing.get(), title);
+				}
+				thrIdmKeyRepository.deleteImmediatelyByUserIdAndKey(actorUserId, idempotencyKey);
 			}
 		}
 		Thr thread = thrRepository.save(Thr.collab(actorUserId, title));

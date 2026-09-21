@@ -6,9 +6,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import com.onggijonggi.common.chat.domain.Thr;
+import com.onggijonggi.common.chat.domain.ThrIdmKey;
 import com.onggijonggi.common.chat.domain.ThrMbr;
+import com.onggijonggi.common.chat.persistence.ThrIdmKeyRepository;
 import com.onggijonggi.common.chat.persistence.ThrMbrRepository;
 import com.onggijonggi.common.chat.persistence.ThrRepository;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -40,6 +44,9 @@ class CollabThreadCreationServiceTest {
 
 	@Autowired
 	private ThrRepository thrRepository;
+
+	@Autowired
+	private ThrIdmKeyRepository thrIdmKeyRepository;
 
 	@MockitoBean
 	private ThrMbrRepository thrMbrRepository;
@@ -154,5 +161,32 @@ class CollabThreadCreationServiceTest {
 		UUID secondUsersThread = collabThreadCreationService.createBlocking(UUID.randomUUID(), title, key);
 
 		assertThat(firstUsersThread).isNotEqualTo(secondUsersThread);
+	}
+
+	/**
+	* TTL(24시간)을 넘긴 키로 재시도하면 옛 행을 즉시 지우고 새 요청으로 진행해야 한다(이슈 #240).
+	* deleteImmediatelyByUserIdAndKey(즉시 실행되는 @Modifying 삭제) 없이 일반 delete()만
+	* 썼다면, 뒤이은 저장이 같은 트랜잭션의 flush 순서 때문에 (user_id, idm_key) 유니크
+	* 인덱스와 충돌해 이 재시도가 실패했다 — 이슈 #233의 msg_idm_key와 같은 패턴이다.
+	*/
+	@Test
+	void treatsAnExpiredKeyAsANewRequestAndDeletesTheStaleRow() throws Exception {
+		UUID userId = UUID.randomUUID();
+		String title = "만료된 방";
+		String key = UUID.randomUUID().toString();
+
+		UUID first = collabThreadCreationService.createBlocking(userId, title, key);
+
+		ThrIdmKey saved = thrIdmKeyRepository.findByUserIdAndKey(userId, key).orElseThrow();
+		var createdAt = ThrIdmKey.class.getDeclaredField("createdAt");
+		createdAt.setAccessible(true);
+		createdAt.set(saved, Instant.now().minus(Duration.ofHours(25)));
+		thrIdmKeyRepository.save(saved);
+
+		// 여기까지 예외 없이 도달하는 것 자체가 증거다 — 고쳐지기 전엔
+		// DataIntegrityViolationException으로 이 호출에서 테스트가 실패했다.
+		UUID retried = collabThreadCreationService.createBlocking(userId, title, key);
+
+		assertThat(retried).isNotEqualTo(first);
 	}
 }
