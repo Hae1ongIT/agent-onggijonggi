@@ -1,0 +1,42 @@
+name: Release Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 다음 버전 계산
+        id: version
+        run: |
+          set -euo pipefail
+          result=$(node scripts/compute-next-version.mjs)
+          echo "last_tag=$(jq -r .lastTag <<< "$result")" >> "$GITHUB_OUTPUT"
+          echo "new_tag=$(jq -r .nextVersion <<< "$result")" >> "$GITHUB_OUTPUT"
+
+      - name: 태그 생성 및 push
+        run: |
+          git tag "${{ steps.version.outputs.new_tag }}"
+          git push origin "${{ steps.version.outputs.new_tag }}"
+
+      - name: GitHub Release 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.new_tag }}" \
+            --title "${{ steps.version.outputs.new_tag }}" \
+            --generate-notes \
+            --notes-start-tag "${{ steps.version.outputs.last_tag }}"
