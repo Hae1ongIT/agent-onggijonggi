@@ -117,14 +117,14 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 		assertThat(json(tenantRow.getTargetRef())).isEqualTo(objectMapper.readTree("{\"tnn_key\":\"" + key + "\"}"));
 		assertThat(tenantRow.getWorkspaceNodeId()).isNull();
 		assertThat(tenantRow.getBeforeJson()).isNull();
-		assertThat(json(tenantRow.getAfterJson()).get("tnn_key").asText()).isEqualTo(key);
+		assertThat(json(tenantRow.getAfterJson()).get("tnn_key").asString()).isEqualTo(key);
 		AuthorizationAudit unitRow = first(rows, AuthorizationAuditEventKind.ORG_UNIT_CREATED);
 		assertThat(json(unitRow.getTargetRef()).propertyNames()).containsExactly("org_unit_key");
 		assertThat(unitRow.getWorkspaceNodeId()).isNull();
 		AuthorizationAudit nodeRow = rows.stream().filter(row -> row.getEventKind() == AuthorizationAuditEventKind.NODE_CREATED
-				&& json(row.getTargetRef()).get("node_key").asText().equals("domestic")).findFirst().orElseThrow();
+				&& json(row.getTargetRef()).get("node_key").asString().equals("domestic")).findFirst().orElseThrow();
 		assertThat(nodeRow.getWorkspaceNodeId()).isEqualTo(domestic.getId());
-		assertThat(json(nodeRow.getTargetRef()).get("wrk_node_id").asText()).isEqualTo(domestic.getId().toString());
+		assertThat(json(nodeRow.getTargetRef()).get("wrk_node_id").asString()).isEqualTo(domestic.getId().toString());
 		AuthorizationAudit policyRow = first(rows, AuthorizationAuditEventKind.POLICY_ADDED);
 		assertThat(json(policyRow.getTargetRef()).propertyNames())
 				.containsExactlyInAnyOrder("wrk_grn_id", "org_unit_key", "role", "wrk_node_id");
@@ -180,11 +180,11 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 				.filter(row -> row.getEventKind() == AuthorizationAuditEventKind.TENANT_DRIFT_DETECTED).toList();
 		assertThat(driftRows).hasSize(1);
 		JsonNode item = json(driftRows.get(0).getAfterJson()).get("drift").get(0);
-		assertThat(item.get("resource").asText()).isEqualTo("node");
-		assertThat(item.get("key").asText()).isEqualTo("legacy");
-		assertThat(item.get("field").asText()).isEqualTo("status");
-		assertThat(item.get("declared").asText()).isEqualTo("INACTIVE");
-		assertThat(item.get("actual").asText()).isEqualTo("ACTIVE");
+		assertThat(item.get("resource").asString()).isEqualTo("node");
+		assertThat(item.get("key").asString()).isEqualTo("legacy");
+		assertThat(item.get("field").asString()).isEqualTo("status");
+		assertThat(item.get("declared").asString()).isEqualTo("INACTIVE");
+		assertThat(item.get("actual").asString()).isEqualTo("ACTIVE");
 		assertThat(driftRows.get(0).getWorkspaceNodeId()).isNull();
 
 		// 선언을 DB와 다시 맞추면 fail-closed가 풀린다.
@@ -244,8 +244,8 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 				AuthorizationAuditEventKind.NODE_DEACTIVATED);
 		assertThat(d2Rows).extracting(AuthorizationAudit::getRequestId).containsOnly(d2Rows.get(0).getRequestId());
 		AuthorizationAudit deactivated = first(d2Rows, AuthorizationAuditEventKind.NODE_DEACTIVATED);
-		assertThat(json(deactivated.getBeforeJson()).get("status").asText()).isEqualTo("ACTIVE");
-		assertThat(json(deactivated.getAfterJson()).get("status").asText()).isEqualTo("INACTIVE");
+		assertThat(json(deactivated.getBeforeJson()).get("status").asString()).isEqualTo("ACTIVE");
+		assertThat(json(deactivated.getAfterJson()).get("status").asString()).isEqualTo("INACTIVE");
 
 		// 같은 배포 ID를 다시 실행해도 아무것도 쓰지 않는다.
 		int rows = audits.findByTenantIdOrderByCreatedAtAscIdAsc(tenant.getId()).size();
@@ -321,10 +321,10 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 		JsonNode item = audits.findByTenantIdOrderByCreatedAtAscIdAsc(tenant.getId()).stream()
 				.filter(row -> row.getEventKind() == AuthorizationAuditEventKind.TENANT_DRIFT_DETECTED)
 				.map(row -> json(row.getAfterJson()).get("drift").get(0)).findFirst().orElseThrow();
-		assertThat(item.get("key").asText()).isEqualTo("domestic");
-		assertThat(item.get("field").asText()).isEqualTo("parent");
-		assertThat(item.get("declared").asText()).isEqualTo("dev-hq");
-		assertThat(item.get("actual").asText()).isEqualTo("sales-hq");
+		assertThat(item.get("key").asString()).isEqualTo("domestic");
+		assertThat(item.get("field").asString()).isEqualTo("parent");
+		assertThat(item.get("declared").asString()).isEqualTo("dev-hq");
+		assertThat(item.get("actual").asString()).isEqualTo("sales-hq");
 	}
 
 	@Test

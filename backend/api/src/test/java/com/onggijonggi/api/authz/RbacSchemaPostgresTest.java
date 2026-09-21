@@ -283,6 +283,49 @@ class RbacSchemaPostgresTest {
 		}
 	}
 
+	// ------------------------------------------------------------------ org_unit 수명주기
+	// org-unit은 비활성화·보존 대상이다. 다른 Tenant로 옮기거나 물리 삭제하면 그 key를 가진 token과 부여·감사의 근거가 사라진다.
+	// 부여가 붙은 행은 복합 FK가 막아 주지만 부여가 없는 행은 막는 것이 없으므로 trigger가 직접 거부해야 한다.
+
+	@Test
+	void orgUnitCannotMoveToAnotherTenantWithOrWithoutGrants() throws SQLException {
+		try (Connection c = connect()) {
+			UUID acme = tenant(c, "acme");
+			UUID globex = tenant(c, "globex");
+			UUID ungranted = orgUnit(c, acme, "ops");
+			UUID granted = orgUnit(c, acme, "sales");
+			UUID root = root(c, acme);
+			UUID common = node(c, acme, root, "common", "COMMON", "Common");
+			grant(c, acme, granted, common, "VIEWER");
+
+			assertRejected("P0001", "tnn_id is immutable", () -> execute(c, "update org_unit set tnn_id = ? where id = ?", globex, ungranted));
+			assertRejected("P0001", "tnn_id is immutable", () -> execute(c, "update org_unit set tnn_id = ? where id = ?", globex, granted));
+
+			assertThat(query(c, "select tnn_id from org_unit where id = ?", ungranted)).isEqualTo(acme);
+			// 이름·상태 변경은 그대로 된다.
+			execute(c, "update org_unit set name = '운영본부', tnn_id = tnn_id where id = ?", ungranted);
+		}
+	}
+
+	@Test
+	void orgUnitsAreNeverPhysicallyDeletedEvenWithoutGrants() throws SQLException {
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "acme");
+			UUID ungranted = orgUnit(c, tenant, "ops");
+			UUID granted = orgUnit(c, tenant, "sales");
+			UUID root = root(c, tenant);
+			UUID common = node(c, tenant, root, "common", "COMMON", "Common");
+			grant(c, tenant, granted, common, "VIEWER");
+
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from org_unit where id = ?", ungranted));
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from org_unit where id = ?", granted));
+
+			assertThat(count(c, "org_unit", "tnn_id", tenant)).isEqualTo(2);
+			// 삭제 대신 비활성화는 그대로 된다.
+			execute(c, "update org_unit set status = 'INACTIVE', inactive_at = now() where id = ?", ungranted);
+		}
+	}
+
 	@Test
 	void nodeKeyCannotBeChanged() throws SQLException {
 		try (Connection c = connect()) {
