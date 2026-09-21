@@ -36,6 +36,21 @@ create trigger trg_tnn_key_immutable
 before update of tnn_key on tnn
 for each row execute function immutable_column_guard('tnn_key');
 
+-- Tenant는 배포 설정의 status로만 켜고 끄며 물리 삭제하지 않는다. 하위 행이 없는 Tenant는 FK가 막지 못하지만,
+-- bootstrap이 ROOT·COMMON·감사 행을 함께 만들어 실제로는 생기지 않는다. 그 우연에 기대지 않고 trigger가 직접 거부한다.
+create or replace function tnn_no_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+    raise exception 'tenants are never physically deleted';
+end;
+$$;
+
+create trigger trg_tnn_no_delete
+before delete on tnn
+for each row execute function tnn_no_delete();
+
 create table org_unit (
     id           uuid         not null,
     tnn_id       uuid         not null,
@@ -258,6 +273,31 @@ $$;
 create trigger trg_wrk_grn_guard
 before insert or update on wrk_grn
 for each row execute function wrk_grn_guard();
+
+-- ACTIVE org-unit의 COMMON VIEWER 부여는 삭제하거나 역할을 바꿀 수 없다. DIRECT가 COMMON VIEW를 요구해서, 이 부여가 사라지면
+-- 그 org-unit 사람들이 개인 채팅을 못 쓴다. ADMIN API도 같은 규칙으로 거절해야 하지만 DB가 마지막 방어선이다.
+-- org-unit을 먼저 비활성화하면 이 규칙은 적용되지 않는다(비활성화 뒤에도 부여 행은 보존한다).
+create or replace function wrk_grn_required_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+    if old.role = 'VIEWER'
+       and (tg_op = 'DELETE' or new.role <> old.role)
+       and exists (select 1 from wrk_node node where node.id = old.wrk_node_id and node.tnn_id = old.tnn_id and node.kind = 'COMMON')
+       and exists (select 1 from org_unit unit where unit.id = old.org_unit_id and unit.tnn_id = old.tnn_id and unit.status = 'ACTIVE') then
+        raise exception 'the COMMON VIEWER grant of an active organization unit is required';
+    end if;
+    if tg_op = 'DELETE' then
+        return old;
+    end if;
+    return new;
+end;
+$$;
+
+create trigger trg_wrk_grn_required_guard
+before delete or update of role on wrk_grn
+for each row execute function wrk_grn_required_guard();
 
 create table authz_adt (
     id            uuid         not null,

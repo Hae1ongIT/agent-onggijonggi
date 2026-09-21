@@ -283,6 +283,54 @@ class RbacSchemaPostgresTest {
 		}
 	}
 
+	// ------------------------------------------------------------------ Tenant 삭제·필수 부여
+
+	@Test
+	void tenantsAreNeverPhysicallyDeletedEvenWhenEmpty() throws SQLException {
+		try (Connection c = connect()) {
+			UUID empty = tenant(c, "empty");
+			UUID used = tenant(c, "used");
+			root(c, used);
+
+			// 하위 행이 없는 Tenant는 FK가 막지 못하므로 trigger가 직접 거부한다.
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from tnn where id = ?", empty));
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from tnn where id = ?", used));
+			assertThat(count(c, "tnn", "id", empty)).isEqualTo(1);
+			// 끄는 것은 status로 한다.
+			execute(c, "update tnn set status = 'INACTIVE', inactive_at = now() where id = ?", empty);
+		}
+	}
+
+	@Test
+	void theCommonViewerGrantOfAnActiveOrgUnitCannotBeRemovedOrChanged() throws SQLException {
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "required");
+			UUID root = root(c, tenant);
+			UUID common = node(c, tenant, root, "common", "COMMON", "Common");
+			UUID sales = node(c, tenant, root, "sales", "ORG", "Sales");
+			UUID unit = orgUnit(c, tenant, "sales-unit");
+			UUID commonViewer = grant(c, tenant, unit, common, "VIEWER");
+			UUID commonAdmin = grant(c, tenant, unit, common, "ADMIN");
+			UUID salesViewer = grant(c, tenant, unit, sales, "VIEWER");
+
+			assertRejected("P0001", "COMMON VIEWER grant", () -> execute(c, "delete from wrk_grn where id = ?", commonViewer));
+			assertRejected("P0001", "COMMON VIEWER grant", () -> execute(c, "update wrk_grn set role = 'CONTRIBUTOR' where id = ?", commonViewer));
+			assertThat(count(c, "wrk_grn", "id", commonViewer)).isEqualTo(1);
+
+			// 필수 부여만 보호한다: COMMON의 다른 역할, COMMON이 아닌 노드의 VIEWER는 지우거나 바꿀 수 있다.
+			execute(c, "update wrk_grn set role = 'CONTRIBUTOR' where id = ?", commonAdmin);
+			execute(c, "delete from wrk_grn where id = ?", commonAdmin);
+			execute(c, "update wrk_grn set role = 'CONTRIBUTOR' where id = ?", salesViewer);
+			execute(c, "delete from wrk_grn where id = ?", salesViewer);
+
+			// org-unit을 먼저 비활성화하면 필수가 아니므로 지울 수 있다(비활성화 뒤에도 부여 행은 보존되는 것이 기본이다).
+			execute(c, "update org_unit set status = 'INACTIVE', inactive_at = now() where id = ?", unit);
+			assertThat(count(c, "wrk_grn", "id", commonViewer)).isEqualTo(1);
+			execute(c, "delete from wrk_grn where id = ?", commonViewer);
+			assertThat(count(c, "wrk_grn", "id", commonViewer)).isEqualTo(0);
+		}
+	}
+
 	// ------------------------------------------------------------------ org_unit 수명주기
 	// org-unit은 비활성화·보존 대상이다. 다른 Tenant로 옮기거나 물리 삭제하면 그 key를 가진 token과 부여·감사의 근거가 사라진다.
 	// 부여가 붙은 행은 복합 FK가 막아 주지만 부여가 없는 행은 막는 것이 없으므로 trigger가 직접 거부해야 한다.
