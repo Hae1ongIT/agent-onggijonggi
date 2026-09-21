@@ -37,6 +37,8 @@ public class RbacBootstrapConfigReader {
 	private static final Set<String> NODE_KEYS = Set.of("node_key", "kind", "parent", "name", "status");
 	private static final Set<String> GRANT_KEYS = Set.of("org_unit", "role", "node");
 	private static final int MAX_DEPLOYMENT_ID_LENGTH = 128;
+	/** 설정 파일 크기 상한(1MiB). */
+	private static final long MAX_CONFIG_BYTES = 1024 * 1024;
 
 	private final String configPath;
 	private final ObjectMapper objectMapper;
@@ -47,9 +49,6 @@ public class RbacBootstrapConfigReader {
 		this.objectMapper = objectMapper;
 	}
 
-	public Optional<RbacBootstrapSpec> load() {
-		return loadWithFingerprint().map(LoadedBootstrapSpec::spec);
-	}
 
 	public Optional<LoadedBootstrapSpec> loadWithFingerprint() {
 		if (configPath == null || configPath.isBlank()) return Optional.empty();
@@ -58,6 +57,13 @@ public class RbacBootstrapConfigReader {
 			throw new RbacBootstrapConfigurationException("bootstrap 설정 경로가 일반 파일이 아니다: " + path);
 		}
 		byte[] bytes;
+		try {
+			if (Files.size(path) > MAX_CONFIG_BYTES) {
+				throw new RbacBootstrapConfigurationException("bootstrap 설정 파일이 " + MAX_CONFIG_BYTES + "바이트를 넘는다");
+			}
+		} catch (IOException exception) {
+			throw new IllegalStateException("bootstrap 설정 파일 크기를 확인할 수 없다: " + path, exception);
+		}
 		try {
 			bytes = Files.readAllBytes(path);
 		} catch (IOException exception) {

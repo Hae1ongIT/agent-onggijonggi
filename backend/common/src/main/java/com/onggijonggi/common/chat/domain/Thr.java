@@ -37,7 +37,8 @@ public class Thr {
 	@Column(name = "drc_own_user_id")
 	private UUID drcOwnUserId;
 
-	@Column(name = "tnn_id")
+	/** 한 번 정해진 Tenant는 바뀌지 않는다. 절체 backfill은 SQL로 채우고 엔티티는 갱신하지 않는다. */
+	@Column(name = "tnn_id", updatable = false)
 	private UUID tenantId;
 
 	@Column(name = "wrk_node_id")

@@ -8,6 +8,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -77,7 +83,10 @@ class RbacSchemaPostgresTest {
 			// node_key는 root·common을 kind가 독점하고, 표시명은 비어 있으면 안 된다
 			assertRejected("23514", "wrk_node_key_reserved", () -> node(c, tenant, root, "common", "ORG", "Other"));
 			assertRejected("23514", "wrk_node_key_reserved", () -> node(c, tenant, root, "root", "ORG", "Other2"));
-			assertRejected("23514", "wrk_node_name_not_blank", () -> node(c, tenant, root, "blank", "ORG", "   "));
+			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "blank", "ORG", "   "));
+			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "blank-tab", "ORG", "\t"));
+			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "padded", "ORG", " Padded"));
+			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "padded-2", "ORG", "Padded\n"));
 			// kind 불변, 물리 삭제 금지, ROOT·COMMON 상태 변경 금지
 			assertRejected("P0001", "kind is immutable", () -> execute(c, "update wrk_node set kind = 'WORK' where id = ?", sales));
 			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from wrk_node where id = ?", sales));
@@ -124,6 +133,34 @@ class RbacSchemaPostgresTest {
 			execute(c, "update wrk_node set name = 'Taken' where id = ?", parent);
 			node(c, tenant, root, "taken", "ORG", "Taken");
 			assertRejected("23505", null, () -> activate(c, parent));
+		}
+	}
+
+	@Test
+	void aParentCannotBeDeactivatedWhileAConcurrentChildInsertIsUncommitted() throws Exception {
+		// 자식 INSERT가 커밋 전이어도 부모 비활성화는 그 자식을 기다렸다가 보고 거부해야 한다(ACTIVE 노드의 조상은 ACTIVE).
+		UUID tenant;
+		UUID parent;
+		try (Connection setup = connect()) {
+			tenant = tenant(setup, "race");
+			UUID root = root(setup, tenant);
+			node(setup, tenant, root, "common", "COMMON", "Common");
+			parent = node(setup, tenant, root, "parent", "ORG", "Parent");
+		}
+		ExecutorService executor = Executors.newSingleThreadExecutor();
+		try (Connection inserter = connect(); Connection deactivator = connect()) {
+			inserter.setAutoCommit(false);
+			node(inserter, tenant, parent, "child", "WORK", "Child"); // 커밋하지 않는다
+			Future<?> deactivation = executor.submit(() -> {
+				deactivate(deactivator, parent);
+				return null;
+			});
+			assertThatThrownBy(() -> deactivation.get(700, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+			inserter.commit();
+			assertThatThrownBy(() -> deactivation.get(10, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
+					.rootCause().isInstanceOf(SQLException.class).hasMessageContaining("deactivate child workspaces first");
+		} finally {
+			executor.shutdownNow();
 		}
 	}
 

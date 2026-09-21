@@ -55,6 +55,7 @@ public class OrgUnit {
 	public String getKey() { return key; }
 	public String getName() { return name; }
 	public OrgUnitStatus getStatus() { return status; }
+	public Instant getInactiveAt() { return inactiveAt; }
 
 	public void rename(String name) {
 		this.name = name;

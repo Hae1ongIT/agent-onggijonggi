@@ -307,6 +307,103 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 		assertThat(tenants.findByKey(otherKey)).isPresent();
 	}
 
+	@Test
+	void parentChangeWithoutReconcileIsDrift() throws Exception {
+		// DB-TST-063: 선언한 부모가 DB와 다르면(reconcile 없음) drift다. 덮어쓰지 않는다.
+		run(new Cfg(key));
+		Tenant tenant = tenants.findByKey(key).orElseThrow();
+
+		RbacBootstrapResult result = run(new Cfg(key).domesticParent("dev-hq"));
+
+		assertThat(result.driftTenants()).containsExactly(key);
+		assertThat(bootstrap.isTenantFailClosed(key)).isTrue();
+		assertThat(node(tenant, "domestic").getParentId()).isEqualTo(node(tenant, "sales-hq").getId());
+		JsonNode item = audits.findByTenantIdOrderByCreatedAtAscIdAsc(tenant.getId()).stream()
+				.filter(row -> row.getEventKind() == AuthorizationAuditEventKind.TENANT_DRIFT_DETECTED)
+				.map(row -> json(row.getAfterJson()).get("drift").get(0)).findFirst().orElseThrow();
+		assertThat(item.get("key").asText()).isEqualTo("domestic");
+		assertThat(item.get("field").asText()).isEqualTo("parent");
+		assertThat(item.get("declared").asText()).isEqualTo("dev-hq");
+		assertThat(item.get("actual").asText()).isEqualTo("sales-hq");
+	}
+
+	@Test
+	void aNodeDeclaredInactiveIsCreatedInactiveEvenWhenAnActiveSiblingHasTheSameName() throws Exception {
+		// 폐기한 노드와 후속 노드의 이름이 같은 흔한 선언이다. ACTIVE로 만든 뒤 끄면 형제 이름 unique가 걸리므로 처음부터
+		// INACTIVE로 만들어야 한다.
+		RbacBootstrapResult result = run(new Cfg(key).legacy("INACTIVE", false).legacyName("Sales HQ"));
+
+		assertThat(result.failures()).isEmpty();
+		assertThat(result.driftTenants()).isEmpty();
+		Tenant tenant = tenants.findByKey(key).orElseThrow();
+		assertThat(node(tenant, "legacy").getStatus()).isEqualTo(WorkspaceNodeStatus.INACTIVE);
+		assertThat(node(tenant, "sales-hq").getStatus()).isEqualTo(WorkspaceNodeStatus.ACTIVE);
+	}
+
+	@Test
+	void aMissingNodeThatCollidesWithAnUndeclaredSiblingIsDriftNotAFailure() throws Exception {
+		run(new Cfg(key));
+		Tenant tenant = tenants.findByKey(key).orElseThrow();
+		WorkspaceNode root = node(tenant, "root");
+		// 설정 밖에서 ADMIN이 만든 노드라고 본다. 선언하려는 노드와 같은 이름이다.
+		nodes.saveAndFlush(WorkspaceNode.child(tenant.getId(), root.getId(), root.getPath(), "adhoc",
+				WorkspaceNodeKind.ORG, "Legacy", WorkspaceNodeStatus.ACTIVE));
+
+		RbacBootstrapResult result = run(new Cfg(key).legacy("ACTIVE", true));
+
+		assertThat(result.failures()).isEmpty();
+		assertThat(result.driftTenants()).containsExactly(key);
+		assertThat(nodes.findByTenantIdAndKey(tenant.getId(), "legacy")).isEmpty();
+		assertThat(bootstrap.isTenantFailClosed(key)).isTrue();
+	}
+
+	@Test
+	void reconcileDoesNotDeactivateANodeThatStillHasActiveDescendantsOrThreads() throws Exception {
+		run(new Cfg(key).legacy("ACTIVE", true));
+		Tenant tenant = tenants.findByKey(key).orElseThrow();
+		WorkspaceNode legacy = node(tenant, "legacy");
+		// 설정 밖에서 만든 활성 하위 노드가 있다: 자동으로 끄지 않는다.
+		WorkspaceNode child = nodes.saveAndFlush(WorkspaceNode.child(tenant.getId(), legacy.getId(), legacy.getPath(),
+				"adhoc-child", WorkspaceNodeKind.WORK, "Adhoc Child", WorkspaceNodeStatus.ACTIVE));
+
+		RbacBootstrapResult blockedByChild = run(new Cfg(key).reconcile("B1").legacy("INACTIVE", false));
+
+		assertThat(blockedByChild.driftTenants()).containsExactly(key);
+		assertThat(node(tenant, "legacy").getStatus()).isEqualTo(WorkspaceNodeStatus.ACTIVE);
+		assertThat(nodes.findById(child.getId()).orElseThrow().getStatus()).isEqualTo(WorkspaceNodeStatus.ACTIVE);
+
+		// 하위 노드가 없어도 Thread가 붙어 있으면 끄지 않는다(개편은 Thread를 먼저 옮긴 뒤 비활성화한다).
+		String other = key + "-t";
+		run(new Cfg(other).legacy("ACTIVE", true));
+		Tenant otherTenant = tenants.findByKey(other).orElseThrow();
+		UUID owner = UUID.randomUUID();
+		jdbcInsertThreadOn(node(otherTenant, "legacy").getId(), owner);
+
+		RbacBootstrapResult blockedByThread = run(new Cfg(other).reconcile("B2").legacy("INACTIVE", false));
+
+		assertThat(blockedByThread.driftTenants()).containsExactly(other);
+		assertThat(node(otherTenant, "legacy").getStatus()).isEqualTo(WorkspaceNodeStatus.ACTIVE);
+	}
+
+	@Test
+	void renameAndReactivationConvergeInASingleReconcile() throws Exception {
+		run(new Cfg(key).legacy("ACTIVE", true));
+		Tenant tenant = tenants.findByKey(key).orElseThrow();
+		run(new Cfg(key).reconcile("C1").legacy("INACTIVE", false));
+		assertThat(node(tenant, "legacy").getStatus()).isEqualTo(WorkspaceNodeStatus.INACTIVE);
+
+		// 옛 이름 "Legacy"를 쓰는 활성 노드가 새로 생기고, legacy는 새 이름으로 되살아나야 한다.
+		String yaml = new Cfg(key).reconcile("C2").legacy("ACTIVE", true).legacyName("Legacy 2").takenName("Legacy").yaml();
+		RbacBootstrapResult result = runRaw(yaml);
+
+		assertThat(result.failures()).isEmpty();
+		assertThat(result.driftTenants()).isEmpty();
+		WorkspaceNode legacy = node(tenant, "legacy");
+		assertThat(legacy.getName()).isEqualTo("Legacy 2");
+		assertThat(legacy.getStatus()).isEqualTo(WorkspaceNodeStatus.ACTIVE);
+		assertThat(node(tenant, "taken").getName()).isEqualTo("Legacy");
+	}
+
 	// ------------------------------------------------------------------ Tenant 잠금 (DB-TST-062)
 
 	@Test
@@ -373,6 +470,25 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 		return objectMapper.readTree(value);
 	}
 
+	/** 노드에 Thread를 하나 붙인다(직접 SQL — 이 테스트는 bootstrap이 Thread를 확인하는지만 본다). */
+	private void jdbcInsertThreadOn(UUID nodeId, UUID user) {
+		try (Connection connection = dataSource.getConnection()) {
+			try (PreparedStatement insertUser = connection.prepareStatement("insert into app_user (id, keycloak_subj) values (?, ?)");
+					PreparedStatement insertThread = connection.prepareStatement(
+							"insert into thr (id, kind, created_user_id, title, wrk_node_id) values (?, 'COLLAB', ?, 't', ?)")) {
+				insertUser.setObject(1, user);
+				insertUser.setString(2, "thread-owner-" + user);
+				insertUser.executeUpdate();
+				insertThread.setObject(1, UUID.randomUUID());
+				insertThread.setObject(2, user);
+				insertThread.setObject(3, nodeId);
+				insertThread.executeUpdate();
+			}
+		} catch (SQLException exception) {
+			throw new IllegalStateException(exception);
+		}
+	}
+
 	/** bootstrap 설정 YAML을 만든다. 기본값은 유효한 설정이고, 테스트는 필요한 부분만 바꾼다. */
 	private static final class Cfg {
 		private final String key;
@@ -382,6 +498,8 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 		private String salesUnitName = "Sales Unit";
 		private String domesticParent = "sales-hq";
 		private String legacyStatus;
+		private String legacyName = "Legacy";
+		private String takenName;
 		private boolean legacyGrant;
 		private boolean devCommonViewer = true;
 		private boolean contributorGrant = true;
@@ -396,6 +514,8 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 		Cfg salesUnitName(String value) { this.salesUnitName = value; return this; }
 		Cfg domesticParent(String value) { this.domesticParent = value; return this; }
 		Cfg legacy(String status, boolean withAdminGrant) { this.legacyStatus = status; this.legacyGrant = withAdminGrant; return this; }
+		Cfg legacyName(String value) { this.legacyName = value; return this; }
+		Cfg takenName(String value) { this.takenName = value; return this; }
 		Cfg omitDevCommonViewer() { this.devCommonViewer = false; return this; }
 		Cfg withoutContributorGrant() { this.contributorGrant = false; return this; }
 
@@ -420,8 +540,12 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 					.append(", name: Domestic, status: ACTIVE }\n");
 			yaml.append("      - { node_key: dev-hq, kind: ORG, parent: root, name: Dev HQ, status: ACTIVE }\n");
 			if (legacyStatus != null) {
-				yaml.append("      - { node_key: legacy, kind: ORG, parent: root, name: Legacy, status: ")
+				yaml.append("      - { node_key: legacy, kind: ORG, parent: root, name: \"").append(legacyName).append("\", status: ")
 						.append(legacyStatus).append(" }\n");
+			}
+			if (takenName != null) {
+				yaml.append("      - { node_key: taken, kind: ORG, parent: root, name: \"").append(takenName)
+						.append("\", status: ACTIVE }\n");
 			}
 			yaml.append("    grants:\n");
 			yaml.append("      - { org_unit: sales, role: VIEWER, node: common }\n");
@@ -430,6 +554,7 @@ class RbacBootstrapPostgresTest extends PostgresSpringTestBase {
 			yaml.append("      - { org_unit: dev, role: ADMIN, node: dev-hq }\n");
 			if (contributorGrant) yaml.append("      - { org_unit: sales, role: CONTRIBUTOR, node: domestic }\n");
 			if (legacyGrant) yaml.append("      - { org_unit: dev, role: ADMIN, node: legacy }\n");
+			if (takenName != null) yaml.append("      - { org_unit: dev, role: ADMIN, node: taken }\n");
 			return yaml.toString();
 		}
 	}

@@ -143,7 +143,8 @@ public class RbacBootstrapService {
 			} catch (RuntimeException exception) {
 				// 한 Tenant의 실패가 다른 Tenant의 처리를 막지 않는다. 확인되지 않은 Tenant는 fail-closed로 둔다.
 				failClosedTenants.add(tenant.key());
-				failures.add(tenant.key() + ": " + exception.getMessage());
+				// 응답에는 예외 종류만 싣는다. Hibernate 예외 메시지는 SQL·제약 상세를 담을 수 있어 로그에만 남긴다.
+				failures.add(tenant.key() + ": " + exception.getClass().getSimpleName());
 				log.error("RBAC bootstrap: tenant {} 처리 실패", tenant.key(), exception);
 			}
 		}
@@ -152,18 +153,25 @@ public class RbacBootstrapService {
 				List.copyOf(drifts), List.copyOf(failures));
 	}
 
-	/** 권한 강제는 다른 이슈에서 도입한다. 지금은 bootstrap이 drift로 판정한 Tenant를 조회할 수 있게만 한다. */
+	/**
+	 * bootstrap이 drift로 판정한 Tenant인지 조회한다. 권한 강제(요청 인가에 거는 것)는 다른 이슈에서 도입한다.
+	 * <b>주의(그 이슈의 계약)</b>: 이 표시는 메모리에만 있다. 앱이 막 떴고 bootstrap이 끝나기 전에는 모든 Tenant가
+	 * 열린 것으로 보이고, 설정이 없거나 깨진 채 재시작하면 이전 drift 표시가 사라진다. 강제 코드는 이 값만 믿지 말고
+	 * 판정 결과를 DB에서 읽는 경로(예: 최근 `TENANT_DRIFT_DETECTED` 감사 행)를 함께 두어야 한다.
+	 */
 	public boolean isTenantFailClosed(String tenantKey) {
 		return failClosedTenants.contains(tenantKey);
 	}
 
 	private TenantOutcome applyTenant(RbacBootstrapSpec.TenantSpec spec, Run run) {
+		// 시작할 때 없던 Tenant를 만들다 unique 충돌이 났고 지금은 있다면, 다른 인스턴스가 동시에 만든 것이다.
+		// 그 경우에만 한 번 다시 시도한다(다른 이유의 제약 위반을 동시 생성으로 오인해 되풀이하지 않는다).
+		boolean absentAtStart = tenantRepository.findByKey(spec.key()).isEmpty();
 		for (int attempt = 1;; attempt++) {
 			try {
 				return transactions.execute(status -> processTenant(spec, run));
 			} catch (DataIntegrityViolationException conflict) {
-				// 다른 인스턴스가 같은 Tenant를 동시에 만든 경우다. 이번에는 행이 있으므로 잠그고 이어서 처리한다.
-				if (attempt >= 2) throw conflict;
+				if (attempt >= 2 || !absentAtStart || tenantRepository.findByKey(spec.key()).isEmpty()) throw conflict;
 				log.info("RBAC bootstrap: tenant {} 동시 생성 충돌, 다시 시도한다", spec.key());
 			}
 		}
@@ -200,12 +208,15 @@ public class RbacBootstrapService {
 		boolean reconcileNow = run.reconcile().applies()
 				&& !authorizationAuditRepository.existsByTenantIdAndDeploymentId(tenant.getId(), run.reconcile().deploymentId());
 		Model model = load(tenant);
-		List<DriftItem> blocked = new ArrayList<>();
 		for (RbacBootstrapSpec.OrgUnitSpec unit : spec.orgUnits()) {
 			if (!model.unitsByKey.containsKey(unit.key())) createOrgUnit(run, tenant, model, unit);
 		}
-		createMissingNodes(run, tenant, spec, model, blocked);
+		// 노드는 두 번에 나눠 만든다. reconcile이 비활성 부모를 재활성화하거나 새로 만든 부모 아래로 옮긴 뒤에야
+		// 만들 수 있는 노드가 있어서, 첫 번째에서 막힌 것은 버리고 reconcile 뒤에 다시 시도해 남는 것만 blocked로 본다.
+		createMissingNodes(run, tenant, spec, model, new ArrayList<>());
 		if (reconcileNow) applyReconcile(run, tenant, spec, model);
+		List<DriftItem> blocked = new ArrayList<>();
+		createMissingNodes(run, tenant, spec, model, blocked);
 		createMissingGrants(run, tenant, spec, model);
 
 		List<DriftItem> drift = new ArrayList<>(drift(tenant, spec, model));
@@ -222,6 +233,9 @@ public class RbacBootstrapService {
 		Model model = new Model();
 		for (OrgUnit unit : orgUnitRepository.findByTenantId(tenant.getId())) model.unitsByKey.put(unit.getKey(), unit);
 		for (WorkspaceNode node : workspaceNodeRepository.findByTenantId(tenant.getId())) model.putNode(node);
+		for (WorkspaceGrant grant : workspaceGrantRepository.findByTenantId(tenant.getId())) {
+			model.grantedNodeIds.add(grant.getWorkspaceNodeId());
+		}
 		return model;
 	}
 
@@ -245,16 +259,15 @@ public class RbacBootstrapService {
 	}
 
 	/**
-	 * 선언된 노드 중 없는 것을 부모부터 만든다. 부모가 아직 없으면 뒤로 미루고, 부모가 비활성이라 만들 수 없으면 blocked에 남긴다
-	 * (생성의 부모는 ACTIVE여야 한다). INACTIVE로 선언된 노드는 ACTIVE로 만든 뒤 자식부터 비활성화한다.
+	 * 선언된 노드 중 없는 것을 부모부터 만든다. 선언된 상태(ACTIVE·INACTIVE)로 바로 만든다. 만들 수 없는 것은 blocked에 남겨
+	 * drift로 보고한다: 부모가 아직 없거나, 부모가 비활성이라 그 아래에는 만들 수 없거나(생성의 부모는 ACTIVE여야 한다),
+	 * 같은 부모 아래 활성 형제와 이름이 겹치는 경우(설정 밖에서 ADMIN이 만든 노드와 겹칠 수 있다 — 제약 위반으로 Tenant
+	 * 전체를 롤백하지 않는다).
 	 */
 	private void createMissingNodes(Run run, Tenant tenant, RbacBootstrapSpec.TenantSpec spec, Model model,
 			List<DriftItem> blocked) {
 		List<RbacBootstrapSpec.NodeSpec> pending = spec.nodes().stream()
 				.filter(node -> !model.nodesByKey.containsKey(node.key())).toList();
-		List<WorkspaceNode> toDeactivate = new ArrayList<>();
-		Map<String, RbacBootstrapSpec.NodeSpec> declared = new HashMap<>();
-		spec.nodes().forEach(node -> declared.put(node.key(), node));
 		while (!pending.isEmpty()) {
 			List<RbacBootstrapSpec.NodeSpec> next = new ArrayList<>();
 			for (RbacBootstrapSpec.NodeSpec node : pending) {
@@ -267,9 +280,13 @@ public class RbacBootstrapService {
 					blocked.add(new DriftItem("node", node.key(), "missing", "부모 " + node.parent() + " ACTIVE에서 생성", "부모가 INACTIVE"));
 					continue;
 				}
-				WorkspaceNode created = createNode(run, tenant, model, WorkspaceNode.child(tenant.getId(), parent.getId(),
-						parent.getPath(), node.key(), workspaceKind(node.kind()), node.name(), WorkspaceNodeStatus.ACTIVE));
-				if (node.status().equals("INACTIVE")) toDeactivate.add(created);
+				WorkspaceNodeStatus status = workspaceStatus(node.status());
+				if (status == WorkspaceNodeStatus.ACTIVE && model.hasActiveSiblingNamed(parent.getId(), node.name(), null)) {
+					blocked.add(new DriftItem("node", node.key(), "missing", "이름 " + node.name() + " 으로 생성", "같은 부모 아래 활성 형제와 이름이 겹침"));
+					continue;
+				}
+				createNode(run, tenant, model, WorkspaceNode.child(tenant.getId(), parent.getId(), parent.getPath(),
+						node.key(), workspaceKind(node.kind()), node.name(), status));
 			}
 			if (next.size() == pending.size()) {
 				// 부모가 만들어지지 못한 노드다. 부모의 blocked 항목이 이미 원인을 담고 있다.
@@ -278,8 +295,6 @@ public class RbacBootstrapService {
 			}
 			pending = next;
 		}
-		toDeactivate.sort(Comparator.comparingInt((WorkspaceNode node) -> node.getPath().length).reversed());
-		for (WorkspaceNode node : toDeactivate) deactivateNode(run, tenant, node);
 	}
 
 	private void createMissingGrants(Run run, Tenant tenant, RbacBootstrapSpec.TenantSpec spec, Model model) {
@@ -421,30 +436,33 @@ public class RbacBootstrapService {
 		}
 	}
 
+	/**
+	 * 노드 reconcile. 한 번의 실행으로 수렴하도록 순서를 정한다: 표시명 → 부모 이동 → 재활성화 → 비활성화.
+	 * 이름을 먼저 맞춰야 재활성화의 형제 이름 충돌 검사가 새 이름 기준이 되고, 부모 이동이 재활성화보다 앞서야
+	 * 옛 부모가 꺼져 있어도 새 부모 아래에서 되살릴 수 있다. 각 단계는 선언 트리 기준으로 부모부터 처리하고
+	 * (비활성화만 자식부터), 규칙에 막히는 변경은 건너뛰어 drift로 남긴다.
+	 */
 	private void reconcileNodes(Run run, Tenant tenant, RbacBootstrapSpec.TenantSpec spec, Model model) {
-		List<RbacBootstrapSpec.NodeSpec> declared = new ArrayList<>(spec.nodes());
-		Comparator<RbacBootstrapSpec.NodeSpec> byDepth = Comparator.comparingInt(node -> {
-			WorkspaceNode actual = model.nodesByKey.get(node.key());
-			return actual == null ? 0 : actual.getPath().length;
-		});
+		Map<String, RbacBootstrapSpec.NodeSpec> declaredByKey = new HashMap<>();
+		spec.nodes().forEach(node -> declaredByKey.put(node.key(), node));
+		List<RbacBootstrapSpec.NodeSpec> topDown = new ArrayList<>(spec.nodes());
+		topDown.sort(Comparator.comparingInt(node -> declaredDepth(node, declaredByKey)));
 
-		// 1) 재활성화는 부모부터. ACTIVE 부모 아래의 대상 노드만 되살리고 하위 노드는 자동으로 살리지 않는다.
-		declared.sort(byDepth);
-		for (RbacBootstrapSpec.NodeSpec node : declared) {
+		// 1) 표시명은 활성 형제와 이름이 겹치지 않을 때만 맞춘다(비활성 노드는 형제 unique 대상이 아니라 바로 맞춘다).
+		for (RbacBootstrapSpec.NodeSpec node : topDown) {
 			WorkspaceNode actual = model.nodesByKey.get(node.key());
-			if (actual == null || !node.status().equals("ACTIVE") || actual.getStatus() != WorkspaceNodeStatus.INACTIVE) continue;
-			WorkspaceNode parent = actual.getParentId() == null ? null : model.nodesById.get(actual.getParentId());
-			if (parent == null || parent.getStatus() != WorkspaceNodeStatus.ACTIVE
-					|| model.hasActiveSiblingNamed(actual.getParentId(), actual.getName(), actual.getId())) continue;
+			if (actual == null || actual.getName().equals(node.name())) continue;
+			if (actual.getStatus() == WorkspaceNodeStatus.ACTIVE
+					&& model.hasActiveSiblingNamed(actual.getParentId(), node.name(), actual.getId())) continue;
 			Map<String, Object> before = nodeSnapshot(actual);
-			actual.reconcileStatus(WorkspaceNodeStatus.ACTIVE);
+			actual.rename(node.name());
 			workspaceNodeRepository.saveAndFlush(actual);
-			audit(run, tenant, AuthorizationAuditEventKind.NODE_REACTIVATED, AuthorizationAuditTargetKind.WORKSPACE,
+			audit(run, tenant, AuthorizationAuditEventKind.NODE_RENAMED, AuthorizationAuditTargetKind.WORKSPACE,
 					nodeRef(actual), actual.getId(), before, nodeSnapshot(actual));
 		}
 
 		// 2) reparent는 자식·부여·Thread가 없는 leaf만, 활성 부모 아래로, 깊이 상한을 지킬 때만 한다.
-		for (RbacBootstrapSpec.NodeSpec node : declared) {
+		for (RbacBootstrapSpec.NodeSpec node : topDown) {
 			WorkspaceNode actual = model.nodesByKey.get(node.key());
 			WorkspaceNode newParent = model.nodesByKey.get(node.parent());
 			if (actual == null || newParent == null || newParent.getId().equals(actual.getParentId())
@@ -457,27 +475,41 @@ public class RbacBootstrapService {
 					nodeRef(actual), actual.getId(), before, nodeSnapshot(actual));
 		}
 
-		// 3) 비활성화는 subtree를 자식부터(bottom-up). 선언되지 않은 하위 노드도 함께 비활성화한다.
-		for (RbacBootstrapSpec.NodeSpec node : declared) {
+		// 3) 재활성화는 부모부터. ACTIVE 부모 아래의 대상 노드만 되살리고 하위 노드는 자동으로 살리지 않는다.
+		for (RbacBootstrapSpec.NodeSpec node : topDown) {
 			WorkspaceNode actual = model.nodesByKey.get(node.key());
-			if (actual == null || !node.status().equals("INACTIVE") || actual.getStatus() != WorkspaceNodeStatus.ACTIVE) continue;
-			List<WorkspaceNode> subtree = new ArrayList<>(model.activeSubtree(actual));
-			subtree.sort(Comparator.comparingInt((WorkspaceNode value) -> value.getPath().length).reversed());
-			for (WorkspaceNode value : subtree) deactivateNode(run, tenant, value);
-		}
-
-		// 4) 표시명은 활성 형제와 이름이 겹치지 않을 때만 맞춘다.
-		for (RbacBootstrapSpec.NodeSpec node : declared) {
-			WorkspaceNode actual = model.nodesByKey.get(node.key());
-			if (actual == null || actual.getName().equals(node.name())) continue;
-			if (actual.getStatus() == WorkspaceNodeStatus.ACTIVE
-					&& model.hasActiveSiblingNamed(actual.getParentId(), node.name(), actual.getId())) continue;
+			if (actual == null || !node.status().equals("ACTIVE") || actual.getStatus() != WorkspaceNodeStatus.INACTIVE) continue;
+			WorkspaceNode parent = actual.getParentId() == null ? null : model.nodesById.get(actual.getParentId());
+			if (parent == null || parent.getStatus() != WorkspaceNodeStatus.ACTIVE
+					|| model.hasActiveSiblingNamed(actual.getParentId(), actual.getName(), actual.getId())) continue;
 			Map<String, Object> before = nodeSnapshot(actual);
-			actual.rename(node.name());
+			actual.reconcileStatus(WorkspaceNodeStatus.ACTIVE);
 			workspaceNodeRepository.saveAndFlush(actual);
-			audit(run, tenant, AuthorizationAuditEventKind.NODE_RENAMED, AuthorizationAuditTargetKind.WORKSPACE,
+			audit(run, tenant, AuthorizationAuditEventKind.NODE_REACTIVATED, AuthorizationAuditTargetKind.WORKSPACE,
 					nodeRef(actual), actual.getId(), before, nodeSnapshot(actual));
 		}
+
+		// 4) 비활성화는 자식부터. 활성 하위 노드(선언 여부와 무관)나 Thread가 남아 있는 노드는 끄지 않는다 —
+		//    설정 밖에서 만든 노드를 자동으로 바꾸지 않고, 개편은 Thread를 먼저 옮긴 뒤 비활성화하기 때문이다.
+		for (int index = topDown.size() - 1; index >= 0; index--) {
+			RbacBootstrapSpec.NodeSpec node = topDown.get(index);
+			WorkspaceNode actual = model.nodesByKey.get(node.key());
+			if (actual == null || !node.status().equals("INACTIVE") || actual.getStatus() != WorkspaceNodeStatus.ACTIVE) continue;
+			if (model.activeSubtree(actual).size() > 1 || threadRepository.existsByWorkspaceNodeId(actual.getId())) continue;
+			deactivateNode(run, tenant, actual);
+		}
+	}
+
+	/** 선언 트리 기준 깊이(root 직속이 1). 설정 검증을 통과한 선언이라 순환은 없다. */
+	private int declaredDepth(RbacBootstrapSpec.NodeSpec node, Map<String, RbacBootstrapSpec.NodeSpec> declaredByKey) {
+		int depth = 1;
+		RbacBootstrapSpec.NodeSpec current = node;
+		while (!current.parent().equals("root")) {
+			current = declaredByKey.get(current.parent());
+			if (current == null) break;
+			depth++;
+		}
+		return depth;
 	}
 
 	private boolean canReparent(WorkspaceNode node, WorkspaceNode newParent, Model model) {
@@ -485,8 +517,7 @@ public class RbacBootstrapService {
 				&& newParent.getKind() != WorkspaceNodeKind.COMMON
 				&& newParent.getPath().length + 1 <= MAX_PATH_LENGTH
 				&& !model.hasChildren(node)
-				&& !workspaceGrantRepository.findByTenantId(node.getTenantId()).stream()
-						.anyMatch(grant -> grant.getWorkspaceNodeId().equals(node.getId()))
+				&& !model.grantedNodeIds.contains(node.getId())
 				&& !threadRepository.existsByWorkspaceNodeId(node.getId())
 				&& (node.getStatus() != WorkspaceNodeStatus.ACTIVE
 						|| !model.hasActiveSiblingNamed(newParent.getId(), node.getName(), node.getId()));
@@ -548,6 +579,7 @@ public class RbacBootstrapService {
 		snapshot.put("tnn_key", tenant.getKey());
 		snapshot.put("name", tenant.getName());
 		snapshot.put("status", tenant.getStatus().name());
+		snapshot.put("inactive_at", tenant.getInactiveAt());
 		return snapshot;
 	}
 
@@ -557,6 +589,7 @@ public class RbacBootstrapService {
 		snapshot.put("org_unit_key", unit.getKey());
 		snapshot.put("name", unit.getName());
 		snapshot.put("status", unit.getStatus().name());
+		snapshot.put("inactive_at", unit.getInactiveAt());
 		return snapshot;
 	}
 
@@ -568,12 +601,15 @@ public class RbacBootstrapService {
 		snapshot.put("prn_id", node.getParentId());
 		snapshot.put("name", node.getName());
 		snapshot.put("status", node.getStatus().name());
+		snapshot.put("path", java.util.Arrays.stream(node.getPath()).map(UUID::toString).toList());
+		snapshot.put("inactive_at", node.getInactiveAt());
 		return snapshot;
 	}
 
 	private Map<String, Object> grantSnapshot(WorkspaceGrant grant) {
 		Map<String, Object> snapshot = new LinkedHashMap<>();
 		snapshot.put("id", grant.getId());
+		snapshot.put("tnn_id", grant.getTenantId());
 		snapshot.put("org_unit_id", grant.getOrgUnitId());
 		snapshot.put("role", grant.getRole().name());
 		snapshot.put("wrk_node_id", grant.getWorkspaceNodeId());
@@ -627,6 +663,8 @@ public class RbacBootstrapService {
 		private final Map<String, OrgUnit> unitsByKey = new HashMap<>();
 		private final Map<String, WorkspaceNode> nodesByKey = new HashMap<>();
 		private final Map<UUID, WorkspaceNode> nodesById = new HashMap<>();
+		/** 부여가 걸린 노드(부여가 있는 노드는 reparent할 수 없다). reconcile 전에 한 번 읽는다. */
+		private final Set<UUID> grantedNodeIds = new HashSet<>();
 
 		void putNode(WorkspaceNode node) {
 			nodesByKey.put(node.getKey(), node);

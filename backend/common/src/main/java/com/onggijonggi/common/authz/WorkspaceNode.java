@@ -90,6 +90,7 @@ public class WorkspaceNode {
 	public String getName() { return name; }
 	public UUID[] getPath() { return path.clone(); }
 	public WorkspaceNodeStatus getStatus() { return status; }
+	public Instant getInactiveAt() { return inactiveAt; }
 
 	public void rename(String name) {
 		this.name = name;

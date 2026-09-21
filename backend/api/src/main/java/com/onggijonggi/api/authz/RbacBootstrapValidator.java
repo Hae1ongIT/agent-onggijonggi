@@ -23,11 +23,19 @@ public class RbacBootstrapValidator {
 	/** ROOT 아래 최대 10단(path 길이 11) — Casbin 기본 역할 관리자의 상속 탐색 깊이다. */
 	static final int MAX_DEPTH_UNDER_ROOT = 10;
 
+	/** 설정 크기 상한. 마운트된 파일은 배포 통제 입력이지만 실수로 커진 선언이 기동 때 자원을 소진하지 않게 한다. */
+	static final int MAX_TENANTS = 100;
+	static final int MAX_ORG_UNITS_PER_TENANT = 500;
+	static final int MAX_NODES_PER_TENANT = 2000;
+	static final int MAX_GRANTS_PER_TENANT = 10000;
+
 	/** Tenant 생성 때 자동으로 만드는 ROOT·COMMON의 표시명. 같은 부모 아래 이름 충돌 검사에 쓴다. */
 	static final String ROOT_NAME = "Root";
 	static final String COMMON_NAME = "Common";
 
 	private static final Pattern KEY = Pattern.compile("^[a-z][a-z0-9-]{0,62}$");
+	/** wrk_node.name CHECK(wrk_node_name_trimmed)와 같은 규칙: 비어 있지 않고 앞뒤 공백이 없다. */
+	private static final Pattern NODE_NAME = Pattern.compile("\\S([\\s\\S]*\\S)?");
 	private static final Set<String> STATUSES = Set.of("ACTIVE", "INACTIVE");
 	private static final Set<String> NODE_KINDS = Set.of("ORG", "WORK");
 	private static final Set<String> ROLES = Set.of("VIEWER", "CONTRIBUTOR", "ADMIN");
@@ -35,6 +43,7 @@ public class RbacBootstrapValidator {
 	public List<String> validate(RbacBootstrapSpec spec) {
 		List<String> problems = new ArrayList<>();
 		if (spec.tenants().isEmpty()) problems.add("tenants가 비어 있다");
+		if (spec.tenants().size() > MAX_TENANTS) problems.add("tenants가 " + MAX_TENANTS + "개를 넘는다");
 		Set<String> tenantKeys = new HashSet<>();
 		for (RbacBootstrapSpec.TenantSpec tenant : spec.tenants()) {
 			String scope = "tenant " + tenant.key();
@@ -48,6 +57,12 @@ public class RbacBootstrapValidator {
 	}
 
 	private void validateTenant(List<String> problems, String scope, RbacBootstrapSpec.TenantSpec tenant) {
+		if (tenant.orgUnits().size() > MAX_ORG_UNITS_PER_TENANT || tenant.nodes().size() > MAX_NODES_PER_TENANT
+				|| tenant.grants().size() > MAX_GRANTS_PER_TENANT) {
+			problems.add(scope + ": 선언이 상한(org_units " + MAX_ORG_UNITS_PER_TENANT + ", nodes " + MAX_NODES_PER_TENANT
+					+ ", grants " + MAX_GRANTS_PER_TENANT + ")을 넘는다");
+			return;
+		}
 		Map<String, RbacBootstrapSpec.OrgUnitSpec> units = new HashMap<>();
 		for (RbacBootstrapSpec.OrgUnitSpec unit : tenant.orgUnits()) {
 			String unitScope = scope + " org_unit " + unit.key();
@@ -67,6 +82,7 @@ public class RbacBootstrapValidator {
 			if (nodes.put(node.key(), node) != null) problems.add(nodeScope + ": node_key가 중복이다");
 			if (!NODE_KINDS.contains(node.kind())) problems.add(nodeScope + ": kind는 ORG 또는 WORK여야 한다");
 			if (node.name().length() > 255) problems.add(nodeScope + ": name이 255자를 넘는다");
+			if (!NODE_NAME.matcher(node.name()).matches()) problems.add(nodeScope + ": name이 비었거나 앞뒤에 공백이 있다");
 			status(problems, nodeScope, node.status());
 		}
 		validateNodeTree(problems, scope, nodes);
@@ -74,7 +90,6 @@ public class RbacBootstrapValidator {
 	}
 
 	private void validateNodeTree(List<String> problems, String scope, Map<String, RbacBootstrapSpec.NodeSpec> nodes) {
-		Map<String, Integer> depths = new HashMap<>();
 		for (RbacBootstrapSpec.NodeSpec node : nodes.values()) {
 			String nodeScope = scope + " node " + node.key();
 			String parent = node.parent();
@@ -86,7 +101,7 @@ public class RbacBootstrapValidator {
 				problems.add(nodeScope + ": parent " + parent + "가 root도 선언된 노드도 아니다");
 				continue;
 			}
-			int depth = depth(node, nodes, depths, new HashSet<>());
+			int depth = depth(node, nodes);
 			if (depth < 0) {
 				problems.add(nodeScope + ": parent가 순환한다");
 			} else if (depth > MAX_DEPTH_UNDER_ROOT) {
@@ -109,23 +124,20 @@ public class RbacBootstrapValidator {
 		}
 	}
 
-	/** root 직속이 1이다. 순환이면 -1을 돌려준다. */
-	private int depth(RbacBootstrapSpec.NodeSpec node, Map<String, RbacBootstrapSpec.NodeSpec> nodes,
-			Map<String, Integer> memo, Set<String> visiting) {
-		Integer known = memo.get(node.key());
-		if (known != null) return known;
-		if (!visiting.add(node.key())) return -1;
-		int result;
-		if (node.parent().equals("root")) {
-			result = 1;
-		} else {
-			RbacBootstrapSpec.NodeSpec parent = nodes.get(node.parent());
-			int parentDepth = parent == null ? 0 : depth(parent, nodes, memo, visiting);
-			result = parentDepth < 0 ? -1 : parentDepth + 1;
+	/** root 직속이 1이다. 순환이면 -1을 돌려준다. 재귀 대신 반복문을 써서 깊은 선언이 스택을 넘기지 않게 한다. */
+	private int depth(RbacBootstrapSpec.NodeSpec node, Map<String, RbacBootstrapSpec.NodeSpec> nodes) {
+		int depth = 1;
+		Set<String> seen = new HashSet<>();
+		seen.add(node.key());
+		RbacBootstrapSpec.NodeSpec current = node;
+		while (!current.parent().equals("root")) {
+			RbacBootstrapSpec.NodeSpec parent = nodes.get(current.parent());
+			if (parent == null) return depth; // 없는 부모는 호출부가 따로 보고한다
+			if (!seen.add(parent.key())) return -1;
+			current = parent;
+			depth++;
 		}
-		visiting.remove(node.key());
-		memo.put(node.key(), result);
-		return result;
+		return depth;
 	}
 
 	private void validateGrants(List<String> problems, String scope, RbacBootstrapSpec.TenantSpec tenant,

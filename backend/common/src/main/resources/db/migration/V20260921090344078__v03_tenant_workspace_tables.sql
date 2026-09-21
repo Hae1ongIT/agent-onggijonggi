@@ -53,7 +53,7 @@ create table wrk_node (
     constraint fk_wrk_node_parent foreign key (tnn_id, prn_id) references wrk_node (tnn_id, id) on delete restrict,
     constraint wrk_node_key_format check (node_key ~ '^[a-z][a-z0-9-]{0,62}$'),
     constraint wrk_node_key_reserved check ((kind = 'ROOT') = (node_key = 'root') and (kind = 'COMMON') = (node_key = 'common')),
-    constraint wrk_node_name_not_blank check (btrim(name) <> ''),
+    constraint wrk_node_name_trimmed check (name ~ '^\S(.*\S)?$'),
     constraint wrk_node_kind_value check (kind in ('ROOT', 'COMMON', 'ORG', 'WORK')),
     constraint wrk_node_status_value check (status in ('ACTIVE', 'INACTIVE')),
     constraint wrk_node_status_time check ((status = 'ACTIVE') = (inactive_at is null)),
@@ -116,7 +116,7 @@ begin
         if new.prn_id is null then
             raise exception 'workspace node must have a parent';
         end if;
-        select * into parent_node from wrk_node where id = new.prn_id and tnn_id = new.tnn_id;
+        select * into parent_node from wrk_node where id = new.prn_id and tnn_id = new.tnn_id for share;
         if not found then
             raise exception 'workspace parent must exist in the same tenant';
         end if;
@@ -144,6 +144,11 @@ begin
     end if;
 
     if tg_op = 'UPDATE' then
+        -- 자식·부여 생성은 이 행을 FOR SHARE로 잡는다. 검사 전에 자기 행을 먼저 잠가야 커밋 전 자식을 기다렸다가 본다.
+        if new.prn_id is distinct from old.prn_id
+           or (old.status = 'ACTIVE' and new.status = 'INACTIVE') then
+            perform 1 from wrk_node where id = old.id for update;
+        end if;
         if new.prn_id is distinct from old.prn_id then
             if exists (select 1 from wrk_node child where child.tnn_id = old.tnn_id and child.prn_id = old.id)
                or exists (select 1 from wrk_grn grant_row where grant_row.tnn_id = old.tnn_id and grant_row.wrk_node_id = old.id)
@@ -190,10 +195,13 @@ begin
     if tg_op = 'UPDATE' and (new.tnn_id <> old.tnn_id or new.org_unit_id <> old.org_unit_id or new.wrk_node_id <> old.wrk_node_id) then
         raise exception 'only the role of a workspace grant can change';
     end if;
-    if not exists (select 1 from org_unit where id = new.org_unit_id and tnn_id = new.tnn_id and status = 'ACTIVE') then
+    -- 대상 행을 FOR SHARE로 잡아 검사 뒤 커밋 전에 org-unit·노드가 비활성화되는 경쟁을 막는다.
+    perform 1 from org_unit where id = new.org_unit_id and tnn_id = new.tnn_id and status = 'ACTIVE' for share;
+    if not found then
         raise exception 'workspace grant requires an active organization unit';
     end if;
-    if not exists (select 1 from wrk_node where id = new.wrk_node_id and tnn_id = new.tnn_id and status = 'ACTIVE' and kind <> 'ROOT') then
+    perform 1 from wrk_node where id = new.wrk_node_id and tnn_id = new.tnn_id and status = 'ACTIVE' and kind <> 'ROOT' for share;
+    if not found then
         raise exception 'workspace grant requires an active non-ROOT node';
     end if;
     new.updated_at := now();

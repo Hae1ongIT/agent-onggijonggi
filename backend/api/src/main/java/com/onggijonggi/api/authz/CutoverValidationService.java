@@ -68,7 +68,7 @@ public class CutoverValidationService {
 			}
 		}
 		currentTenantRepository.deleteAllInBatch();
-		// JdbcTemplate 조회가 이 행들을 보려면 먼저 DB에 내보내야 한다(assigned-id 엔티티는 flush 전에는 쿼리에 보이지 않는다).
+		// 이 트랜잭션 안에서 바로 DB에 내보내 제약 위반을 이 호출에서 드러낸다(staging은 운영자가 이후 backfill 전에 조회한다).
 		currentTenantRepository.saveAllAndFlush(staged);
 
 		List<CutoverValidationResult.OwnerTenantMismatch> owners = new ArrayList<>();
