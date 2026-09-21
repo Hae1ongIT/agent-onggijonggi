@@ -18,6 +18,11 @@ alter table thr_inv add constraint thr_inv_pending_reason_value
 create index ix_thr_inv_pending_subj on thr_inv (subj)
     where status = 'PENDING';
 
+-- wrk_node의 reparent·비활성화 검사와 bootstrap reconcile이 "이 노드에 Thread가 있나"를 노드마다 묻는다.
+-- 인덱스가 없으면 그때마다 thr 전체를 훑는다. 절체 전에는 대부분 null이라 부분 인덱스로 둔다.
+create index ix_thr_wrk_node on thr (wrk_node_id)
+    where wrk_node_id is not null;
+
 -- 자식 행의 tnn_id는 코드가 아니라 DB가 Thread에서 복사한다. 절체 뒤 NOT NULL과 (tnn_id, thr_id) 복합 FK가 걸려도
 -- 자식을 저장하는 경로(참여자·메시지·idempotency key·초대·위험 검사 커서)를 하나씩 고칠 필요가 없고,
 -- tnn_id를 빠뜨린 경로가 구조상 생기지 않는다. 호출자가 넣은 값과 무관하게 Thread 값으로 덮어쓰며,
@@ -25,6 +30,7 @@ create index ix_thr_inv_pending_subj on thr_inv (subj)
 create or replace function copy_thr_tnn_id()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     new.tnn_id := (select t.tnn_id from thr t where t.id = new.thr_id);

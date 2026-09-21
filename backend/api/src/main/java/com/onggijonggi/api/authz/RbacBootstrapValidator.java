@@ -36,6 +36,11 @@ public class RbacBootstrapValidator {
 	private static final Pattern KEY = Pattern.compile("^[a-z][a-z0-9-]{0,62}$");
 	/** wrk_node.name CHECK(wrk_node_name_trimmed)와 같은 규칙: 비어 있지 않고 앞뒤 공백이 없다. */
 	private static final Pattern NODE_NAME = Pattern.compile("\\S([\\s\\S]*\\S)?");
+
+	/** 표시명은 목록·감사 로그에 그대로 나가므로 가운데에 개행·제어문자가 섞이는 것도 막는다(DB CHECK와 같은 규칙). */
+	private static boolean isDisplayName(String value) {
+		return NODE_NAME.matcher(value).matches() && value.codePoints().noneMatch(Character::isISOControl);
+	}
 	private static final Set<String> STATUSES = Set.of("ACTIVE", "INACTIVE");
 	private static final Set<String> NODE_KINDS = Set.of("ORG", "WORK");
 	private static final Set<String> ROLES = Set.of("VIEWER", "CONTRIBUTOR", "ADMIN");
@@ -82,7 +87,7 @@ public class RbacBootstrapValidator {
 			if (nodes.put(node.key(), node) != null) problems.add(nodeScope + ": node_key가 중복이다");
 			if (!NODE_KINDS.contains(node.kind())) problems.add(nodeScope + ": kind는 ORG 또는 WORK여야 한다");
 			if (node.name().length() > 255) problems.add(nodeScope + ": name이 255자를 넘는다");
-			if (!NODE_NAME.matcher(node.name()).matches()) problems.add(nodeScope + ": name이 비었거나 앞뒤에 공백이 있다");
+			if (!isDisplayName(node.name())) problems.add(nodeScope + ": name이 비었거나 앞뒤 공백·제어문자가 있다");
 			status(problems, nodeScope, node.status());
 		}
 		validateNodeTree(problems, scope, nodes);

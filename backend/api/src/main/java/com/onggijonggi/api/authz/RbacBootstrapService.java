@@ -368,12 +368,13 @@ public class RbacBootstrapService {
 		return warnings;
 	}
 
-	/** 같은 설정으로 시작할 때마다 같은 drift 행이 쌓이지 않도록, 이 Tenant의 가장 최근 감사 행이 같은 drift면 다시 적지 않는다. */
+	/** 같은 설정으로 시작할 때마다 같은 drift 행이 쌓이지 않도록, 이 Tenant의 직전 drift 행이 같은 내용이면 다시 적지 않는다. */
 	private void recordDrift(Run run, Tenant tenant, List<DriftItem> drift) {
 		JsonNode after = objectMapper.valueToTree(driftPayload(drift));
 		Optional<AuthorizationAudit> latest = authorizationAuditRepository
-				.findFirstByTenantIdOrderByCreatedAtDescIdDesc(tenant.getId());
-		if (latest.isPresent() && latest.get().getEventKind() == AuthorizationAuditEventKind.TENANT_DRIFT_DETECTED
+				.findFirstByTenantIdAndEventKindOrderByCreatedAtDescIdDesc(tenant.getId(),
+						AuthorizationAuditEventKind.TENANT_DRIFT_DETECTED);
+		if (latest.isPresent()
 				&& run.fingerprint().equals(latest.get().getConfigurationFingerprint())
 				&& after.equals(objectMapper.readTree(latest.get().getAfterJson()))) {
 			return;
@@ -500,13 +501,18 @@ public class RbacBootstrapService {
 		}
 	}
 
-	/** 선언 트리 기준 깊이(root 직속이 1). 설정 검증을 통과한 선언이라 순환은 없다. */
+	/**
+	 * 선언 트리 기준 깊이(root 직속이 1). 설정 검증이 순환을 먼저 거부하지만, 검증을 건너뛴 경로로 불리더라도
+	 * 무한 루프가 되지 않도록 지나온 key를 기억한다.
+	 */
 	private int declaredDepth(RbacBootstrapSpec.NodeSpec node, Map<String, RbacBootstrapSpec.NodeSpec> declaredByKey) {
 		int depth = 1;
+		Set<String> seen = new HashSet<>();
+		seen.add(node.key());
 		RbacBootstrapSpec.NodeSpec current = node;
 		while (!current.parent().equals("root")) {
 			current = declaredByKey.get(current.parent());
-			if (current == null) break;
+			if (current == null || !seen.add(current.key())) break;
 			depth++;
 		}
 		return depth;

@@ -235,12 +235,13 @@ class RbacBootstrapValidatorTest {
 
 	@Test
 	void nodeNamesMustBeNonBlankAndTrimmed() {
-		for (String bad : new String[] { " Padded", "Padded ", "\tTabbed", "Line\n", "   ", "" }) {
+		// 앞뒤 공백뿐 아니라 가운데 개행·제어문자도 막는다(DB CHECK와 같은 규칙).
+		for (String bad : new String[] { " Padded", "Padded ", "\tTabbed", "Line\n", "   ", "", "a\nb", "a\u0001b" }) {
 			assertThat(problemsOf(with(parts -> {
 				parts.nodes.set(0, node("sales-hq", "root", bad));
 				return parts;
 			}))).as("이름 '%s'", bad.replace("\n", "\\n").replace("\t", "\\t"))
-					.anyMatch(problem -> problem.contains("비었거나 앞뒤에 공백이 있다"));
+					.anyMatch(problem -> problem.contains("비었거나 앞뒤 공백·제어문자가 있다"));
 		}
 		assertThat(problemsOf(with(parts -> {
 			parts.nodes.set(0, node("sales-hq", "root", "영업 본부 (서울)"));

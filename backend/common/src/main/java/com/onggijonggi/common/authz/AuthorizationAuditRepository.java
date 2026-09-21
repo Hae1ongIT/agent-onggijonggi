@@ -17,4 +17,11 @@ public interface AuthorizationAuditRepository extends JpaRepository<Authorizatio
 	List<AuthorizationAudit> findByTenantIdOrderByCreatedAtAscIdAsc(UUID tenantId);
 
 	Optional<AuthorizationAudit> findFirstByTenantIdOrderByCreatedAtDescIdDesc(UUID tenantId);
+
+	/**
+	 * 같은 drift를 다시 적지 않으려고 직전 drift 행만 찾는다. "가장 최근 행"으로 찾으면 같은 실행에서 노드·부여를
+	 * 먼저 만든 경우 그 생성 행이 잡혀 중복 판정이 빗나간다.
+	 */
+	Optional<AuthorizationAudit> findFirstByTenantIdAndEventKindOrderByCreatedAtDescIdDesc(UUID tenantId,
+			AuthorizationAuditEventKind eventKind);
 }

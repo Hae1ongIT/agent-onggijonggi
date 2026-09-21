@@ -8,8 +8,13 @@
 create or replace function immutable_column_guard()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
+    -- 없는 컬럼 이름을 주면 두 값이 모두 null이라 비교가 늘 거짓이 된다. 조용히 통과하지 않도록 먼저 확인한다.
+    if not jsonb_exists(to_jsonb(new), tg_argv[0]) then
+        raise exception 'immutable_column_guard: unknown column %', tg_argv[0];
+    end if;
     if to_jsonb(new) ->> tg_argv[0] is distinct from to_jsonb(old) ->> tg_argv[0] then
         raise exception '% is immutable', tg_argv[0];
     end if;
@@ -41,6 +46,7 @@ for each row execute function immutable_column_guard('tnn_key');
 create or replace function tnn_no_delete()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     raise exception 'tenants are never physically deleted';
@@ -82,6 +88,7 @@ for each row execute function immutable_column_guard('tnn_id');
 create or replace function org_unit_no_delete()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     raise exception 'organization units are never physically deleted';
@@ -110,7 +117,7 @@ create table wrk_node (
     constraint fk_wrk_node_parent foreign key (tnn_id, prn_id) references wrk_node (tnn_id, id) on delete restrict,
     constraint wrk_node_key_format check (node_key ~ '^[a-z][a-z0-9-]{0,62}$'),
     constraint wrk_node_key_reserved check ((kind = 'ROOT') = (node_key = 'root') and (kind = 'COMMON') = (node_key = 'common')),
-    constraint wrk_node_name_trimmed check (name ~ '^\S(.*\S)?$'),
+    constraint wrk_node_name_trimmed check (name ~ '^\S(.*\S)?$' and name !~ '[[:cntrl:]]'),
     constraint wrk_node_kind_value check (kind in ('ROOT', 'COMMON', 'ORG', 'WORK')),
     constraint wrk_node_status_value check (status in ('ACTIVE', 'INACTIVE')),
     constraint wrk_node_status_time check ((status = 'ACTIVE') = (inactive_at is null)),
@@ -156,6 +163,7 @@ create index ix_wrk_grn_tnn_node on wrk_grn (tnn_id, wrk_node_id);
 create or replace function wrk_node_guard()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 declare
     parent_node wrk_node%rowtype;
@@ -237,6 +245,7 @@ for each row execute function wrk_node_guard();
 create or replace function wrk_node_no_delete()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     raise exception 'workspace nodes are never physically deleted';
@@ -251,6 +260,7 @@ for each row execute function wrk_node_no_delete();
 create or replace function wrk_grn_guard()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     if tg_op = 'UPDATE' and (new.tnn_id <> old.tnn_id or new.org_unit_id <> old.org_unit_id or new.wrk_node_id <> old.wrk_node_id) then
@@ -276,17 +286,19 @@ for each row execute function wrk_grn_guard();
 
 -- ACTIVE org-unit의 COMMON VIEWER 부여는 삭제하거나 역할을 바꿀 수 없다. DIRECT가 COMMON VIEW를 요구해서, 이 부여가 사라지면
 -- 그 org-unit 사람들이 개인 채팅을 못 쓴다. ADMIN API도 같은 규칙으로 거절해야 하지만 DB가 마지막 방어선이다.
--- org-unit을 먼저 비활성화하면 이 규칙은 적용되지 않는다(비활성화 뒤에도 부여 행은 보존한다).
+-- org-unit의 상태와 무관하게 막는다. 비활성 중에는 허용하면 "끄고 → 지우고 → 켠다"로 ACTIVE org-unit에 필수 부여가
+-- 없는 상태를 만들 수 있고, 비활성화 뒤에도 부여를 보존하는 이유 자체가 재활성화 때 끄기 전 상태로 돌아가는 것이다.
+-- org-unit은 물리 삭제하지 않으므로 이 부여는 사실상 영구 보존된다.
 create or replace function wrk_grn_required_guard()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     if old.role = 'VIEWER'
        and (tg_op = 'DELETE' or new.role <> old.role)
-       and exists (select 1 from wrk_node node where node.id = old.wrk_node_id and node.tnn_id = old.tnn_id and node.kind = 'COMMON')
-       and exists (select 1 from org_unit unit where unit.id = old.org_unit_id and unit.tnn_id = old.tnn_id and unit.status = 'ACTIVE') then
-        raise exception 'the COMMON VIEWER grant of an active organization unit is required';
+       and exists (select 1 from wrk_node node where node.id = old.wrk_node_id and node.tnn_id = old.tnn_id and node.kind = 'COMMON') then
+        raise exception 'the COMMON VIEWER grant of an organization unit is required';
     end if;
     if tg_op = 'DELETE' then
         return old;
@@ -337,6 +349,7 @@ create index ix_authz_adt_tnn_node_created on authz_adt (tnn_id, wrk_node_id, cr
 create or replace function authz_adt_append_only()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     raise exception 'authorization audit rows are append-only';
@@ -351,5 +364,33 @@ create trigger trg_authz_adt_no_truncate
 before truncate on authz_adt
 for each statement execute function authz_adt_append_only();
 
+-- 행 단위 삭제를 거부하는 표는 TRUNCATE도 거부한다. TRUNCATE는 행 trigger를 부르지 않아 따로 걸어야 한다.
+create trigger trg_tnn_no_truncate
+before truncate on tnn
+for each statement execute function tnn_no_delete();
+
+create trigger trg_org_unit_no_truncate
+before truncate on org_unit
+for each statement execute function org_unit_no_delete();
+
+create trigger trg_wrk_node_no_truncate
+before truncate on wrk_node
+for each statement execute function wrk_node_no_delete();
+
+-- 위 guard는 전부 ENABLE ALWAYS로 고정한다. 기본 상태의 trigger는 session_replication_role = replica면 건너뛰는데,
+-- 이 저장소의 앱 계정이 그 설정을 바꿀 수 있어서 고정하지 않으면 "어떤 계정으로도 거부한다"가 성립하지 않는다.
+alter table tnn enable always trigger trg_tnn_key_immutable;
+alter table tnn enable always trigger trg_tnn_no_delete;
+alter table tnn enable always trigger trg_tnn_no_truncate;
+alter table org_unit enable always trigger trg_org_unit_key_immutable;
+alter table org_unit enable always trigger trg_org_unit_tnn_immutable;
+alter table org_unit enable always trigger trg_org_unit_no_delete;
+alter table org_unit enable always trigger trg_org_unit_no_truncate;
+alter table wrk_node enable always trigger trg_wrk_node_key_immutable;
+alter table wrk_node enable always trigger trg_wrk_node_guard;
+alter table wrk_node enable always trigger trg_wrk_node_no_delete;
+alter table wrk_node enable always trigger trg_wrk_node_no_truncate;
+alter table wrk_grn enable always trigger trg_wrk_grn_guard;
+alter table wrk_grn enable always trigger trg_wrk_grn_required_guard;
 alter table authz_adt enable always trigger trg_authz_adt_append_only;
 alter table authz_adt enable always trigger trg_authz_adt_no_truncate;

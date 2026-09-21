@@ -87,6 +87,11 @@ class RbacSchemaPostgresTest {
 			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "blank-tab", "ORG", "\t"));
 			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "padded", "ORG", " Padded"));
 			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "padded-2", "ORG", "Padded\n"));
+			// 가운데 개행·제어문자도 막는다. 표시명은 목록·감사 로그에 그대로 나간다.
+			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "inner-nl", "ORG", "a\nb"));
+			assertRejected("23514", "wrk_node_name_trimmed", () -> node(c, tenant, root, "inner-ctl", "ORG", "a\u0001b"));
+			// 가운데 보통 공백은 정상이다.
+			node(c, tenant, root, "spaced", "ORG", "영업 본부");
 			// kind 불변, 물리 삭제 금지, ROOT·COMMON 상태 변경 금지
 			assertRejected("P0001", "kind is immutable", () -> execute(c, "update wrk_node set kind = 'WORK' where id = ?", sales));
 			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from wrk_node where id = ?", sales));
@@ -323,11 +328,36 @@ class RbacSchemaPostgresTest {
 			execute(c, "update wrk_grn set role = 'CONTRIBUTOR' where id = ?", salesViewer);
 			execute(c, "delete from wrk_grn where id = ?", salesViewer);
 
-			// org-unit을 먼저 비활성화하면 필수가 아니므로 지울 수 있다(비활성화 뒤에도 부여 행은 보존되는 것이 기본이다).
+			// org-unit을 껐다 켜는 우회로도 막힌다. 허용하면 "끄고 → 지우고 → 켠다"로 ACTIVE org-unit에 필수 부여가 없어진다.
 			execute(c, "update org_unit set status = 'INACTIVE', inactive_at = now() where id = ?", unit);
+			assertRejected("P0001", "COMMON VIEWER grant", () -> execute(c, "delete from wrk_grn where id = ?", commonViewer));
+			execute(c, "update org_unit set status = 'ACTIVE', inactive_at = null where id = ?", unit);
 			assertThat(count(c, "wrk_grn", "id", commonViewer)).isEqualTo(1);
-			execute(c, "delete from wrk_grn where id = ?", commonViewer);
-			assertThat(count(c, "wrk_grn", "id", commonViewer)).isEqualTo(0);
+		}
+	}
+
+	@Test
+	void guardsAreNotBypassedByReplicationRoleOrTruncate() throws SQLException {
+		// guard가 ENABLE ALWAYS가 아니면 session_replication_role = replica로 전부 건너뛴다. 이 저장소의 앱 계정은
+		// superuser라 그 설정을 실제로 바꿀 수 있다. TRUNCATE는 행 trigger를 부르지 않으므로 따로 확인한다.
+		try (Connection c = connect()) {
+			UUID tenant = tenant(c, "bypass");
+			UUID root = root(c, tenant);
+			node(c, tenant, root, "common", "COMMON", "Common");
+			UUID unit = orgUnit(c, tenant, "staff");
+
+			execute(c, "set session_replication_role = replica");
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from wrk_node where id = ?", root));
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from org_unit where id = ?", unit));
+			assertRejected("P0001", "never physically deleted", () -> execute(c, "delete from tnn where id = ?", tenant));
+			assertRejected("P0001", "tnn_key is immutable", () -> execute(c, "update tnn set tnn_key = 'hijacked' where id = ?", tenant));
+			assertRejected("P0001", "workspace kind is immutable", () -> execute(c, "update wrk_node set kind = 'WORK' where id = ?", root));
+			execute(c, "set session_replication_role = origin");
+
+			for (String table : new String[] { "tnn", "org_unit", "wrk_node", "authz_adt" }) {
+				assertRejected("P0001", null, () -> execute(c, "truncate " + table + " cascade"));
+			}
+			assertThat(count(c, "tnn", "id", tenant)).isEqualTo(1);
 		}
 	}
 
